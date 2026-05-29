@@ -56,6 +56,9 @@ def test_agent_runs_tool_then_final(tmp_path):
 
     assert assistant_tool_calls
     assert tool_results
+    assert len(assistant_tool_calls[0]["tool_uses"]) == 1
+    assert assistant_tool_calls[0]["tool_uses"][0]["id"].startswith("toolu_")
+    assert tool_results[0]["parent_tool_use_id"] == assistant_tool_calls[0]["tool_uses"][0]["id"]
     assert agent.session["history"].index(assistant_tool_calls[0]) < agent.session["history"].index(tool_results[0])
     assert "hello.txt" in agent.session["memory"]["files"]
 
@@ -79,6 +82,138 @@ def test_second_model_prompt_preserves_assistant_tool_call_context(tmp_path):
     assert '<tool>{"name":"read_file","args":{"path":"hello.txt","start":1,"end":1}}</tool>' in second_prompt
     assert '[tool:read_file] {"end": 1, "path": "hello.txt", "start": 1}' in second_prompt
     assert "# hello.txt\n   1: alpha\n" in second_prompt
+
+
+def test_parse_returns_tool_batch_with_ids_for_multiple_tool_blocks(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    kind, payload = agent.parse(
+        '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":5}}</tool>\n'
+        '<tool>{"name":"search","args":{"pattern":"demo","path":"."}}</tool>'
+    )
+
+    assert kind == "tool_batch"
+    assert [item["name"] for item in payload] == ["read_file", "search"]
+    assert all(item["id"].startswith("toolu_") for item in payload)
+    assert payload[0]["id"] != payload[1]["id"]
+
+
+def test_agent_runs_multiple_tools_from_one_turn(tmp_path):
+    (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            '<tool>{"name":"read_file","args":{"path":"a.txt","start":1,"end":1}}</tool>\n'
+            '<tool>{"name":"read_file","args":{"path":"b.txt","start":1,"end":1}}</tool>',
+            "<final>Read both files successfully.</final>",
+        ],
+    )
+
+    answer = agent.ask("Inspect both files")
+
+    assert answer == "Read both files successfully."
+    assistant_tool_call = next(
+        item for item in agent.session["history"] if item["role"] == "assistant" and item.get("tool_uses")
+    )
+    tool_results = [item for item in agent.session["history"] if item["role"] == "tool" and item["name"] == "read_file"]
+
+    assert len(assistant_tool_call["tool_uses"]) == 2
+    assert [item["parent_tool_use_id"] for item in tool_results] == [
+        tool_use["id"] for tool_use in assistant_tool_call["tool_uses"]
+    ]
+    second_prompt = agent.model_client.prompts[1]
+    assert '[parent_tool_use_id:' in second_prompt
+    assert "# a.txt\n   1: alpha\n" in second_prompt
+    assert "# b.txt\n   1: beta\n" in second_prompt
+    trace_events = [
+        json.loads(line)
+        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
+    ]
+    parsed_event = next(event for event in trace_events if event["event"] == "model_parsed" and event["kind"] == "tool_batch")
+    tool_events = [event for event in trace_events if event["event"] == "tool_executed"]
+
+    assert parsed_event["tool_use_count"] == 2
+    assert [item["name"] for item in parsed_event["tool_uses"]] == ["read_file", "read_file"]
+    assert [event["tool_use_id"] for event in tool_events[:2]] == [
+        tool_use["id"] for tool_use in assistant_tool_call["tool_uses"]
+    ]
+    assert tool_events[0]["batch_index"] == 0
+    assert tool_events[0]["batch_size"] == 2
+    assert tool_events[0]["synthetic"] is False
+
+
+def test_failed_tool_batch_marks_remaining_tools_as_skipped(tmp_path):
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            '<tool>{"name":"write_file","args":{"path":"blocked.txt","content":"nope\\n"}}</tool>\n'
+            '<tool>{"name":"read_file","args":{"path":"hello.txt","start":1,"end":1}}</tool>',
+            "<final>Stopped after tool rejection.</final>",
+        ],
+        approval_policy="never",
+    )
+
+    answer = agent.ask("Try the write, then read the file")
+
+    assert answer == "Stopped after tool rejection."
+    assistant_tool_call = next(
+        item for item in agent.session["history"] if item["role"] == "assistant" and item.get("tool_uses")
+    )
+    tool_results = [item for item in agent.session["history"] if item["role"] == "tool"]
+
+    assert tool_results[0]["name"] == "write_file"
+    assert "error: approval denied for write_file" in tool_results[0]["content"]
+    assert tool_results[1]["name"] == "read_file"
+    assert tool_results[1]["synthetic"] is True
+    assert "error: skipped read_file; previous tool write_file did not complete successfully" in tool_results[1]["content"]
+    assert tool_results[1]["parent_tool_use_id"] == assistant_tool_call["tool_uses"][1]["id"]
+    trace_events = [
+        json.loads(line)
+        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
+    ]
+    tool_events = [event for event in trace_events if event["event"] == "tool_executed"]
+
+    assert tool_events[0]["tool_use_id"] == assistant_tool_call["tool_uses"][0]["id"]
+    assert tool_events[0]["synthetic"] is False
+    assert tool_events[1]["tool_use_id"] == assistant_tool_call["tool_uses"][1]["id"]
+    assert tool_events[1]["synthetic"] is True
+    assert tool_events[1]["skip_reason"] == "previous tool write_file did not complete successfully"
+    assert tool_events[1]["tool_status"] == "synthetic_skipped"
+
+
+def test_step_limit_marks_remaining_batch_tools_as_skipped(tmp_path):
+    (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            '<tool>{"name":"read_file","args":{"path":"a.txt","start":1,"end":1}}</tool>\n'
+            '<tool>{"name":"read_file","args":{"path":"b.txt","start":1,"end":1}}</tool>',
+        ],
+        max_steps=1,
+    )
+
+    answer = agent.ask("Read both files with one step only")
+
+    assert answer == "Stopped after reaching the step limit without a final answer."
+    tool_results = [item for item in agent.session["history"] if item["role"] == "tool"]
+
+    assert len(tool_results) == 2
+    assert "# a.txt\n   1: alpha" in tool_results[0]["content"]
+    assert tool_results[1]["synthetic"] is True
+    assert "error: skipped read_file; step limit reached before execution" in tool_results[1]["content"]
+    trace_events = [
+        json.loads(line)
+        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
+    ]
+    tool_events = [event for event in trace_events if event["event"] == "tool_executed"]
+
+    assert tool_events[1]["synthetic"] is True
+    assert tool_events[1]["skip_reason"] == "step limit reached before execution"
+    assert tool_events[1]["batch_index"] == 1
+    assert tool_events[1]["batch_size"] == 2
 
 
 def test_agent_updates_task_summary_on_each_request(tmp_path):

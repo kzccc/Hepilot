@@ -380,10 +380,13 @@ class Hepilot:
             risk = "approval required" if tool["risky"] else "safe"
             tool_lines.append(f"- {name}({fields}) [{risk}] {tool['description']}")
         tool_text = "\n".join(tool_lines)
+        # 提前把“单轮可多工具、按顺序执行”的协议写进前缀，避免后续 parser/runtime
+        # 支持批量 tool call 后，模型仍然被旧提示约束成“每轮只能一个工具”。
         examples = "\n".join(
             [
                 '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
                 '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
+                '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":40}}</tool>\n<tool>{"name":"search","args":{"pattern":"TODO","path":"."}}</tool>',
                 '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
                 '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
                 '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
@@ -398,7 +401,9 @@ class Hepilot:
 
             Rules:
             - Use tools instead of guessing about the workspace.
-            - Return exactly one <tool>...</tool> or one <final>...</final>.
+            - Return one or more <tool>...</tool> blocks, or one <final>...</final>.
+            - If you need multiple independent tools in the same turn, emit multiple <tool> blocks in order.
+            - If you emit any <tool> block, do not emit a <final> block in the same reply.
             - Tool calls must look like:
               <tool>{{"name":"tool_name","args":{{...}}}}</tool>
             - For write_file and patch_file with multi-line text, prefer XML style:
@@ -500,13 +505,24 @@ class Hepilot:
 
             if item["role"] == "tool":
                 limit = 900 if recent else 180
-                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}")
+                # tool result 在多工具协议下可能带 parent_tool_use_id；
+                # 这里把 id 作为附加标记渲染出来，既兼容旧历史，也让新历史能稳定对齐到对应 tool_use。
+                lines.append(self.render_tool_history_header(item))
                 lines.append(clip(item["content"], limit))
             else:
                 limit = 900 if recent else 220
                 lines.append(f"[{item['role']}] {clip(item['content'], limit)}")
 
         return clip("\n".join(lines), MAX_HISTORY)
+
+    @staticmethod
+    def render_tool_history_header(item):
+        """渲染单条 tool history 的头部，兼容旧格式并保留可选的配对 id。"""
+        prefix = f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}"
+        parent_tool_use_id = str(item.get("parent_tool_use_id", "")).strip()
+        if parent_tool_use_id:
+            prefix += f" [parent_tool_use_id:{parent_tool_use_id}]"
+        return prefix
 
     def feature_enabled(self, name):
         """读取 feature flag，未知开关默认关闭。"""
@@ -521,6 +537,75 @@ class Hepilot:
         """向 session history 追加一条事件并控制总长度。"""
         self.session["history"].append(item)
         self.session_path = self.session_store.save(self.session)
+
+    def record_synthetic_tool_results(self, task_state, tool_calls, reason, batch_size, start_index):
+        """为未执行的 tool call 补写 synthetic result，并同步写入可配对的 trace 事件。"""
+        reason = str(reason or "").strip() or "skipped before execution"
+        for offset, tool_call in enumerate(tool_calls):
+            result = f"error: skipped {tool_call.get('name', '')}; {reason}"
+            self.record(
+                {
+                    "role": "tool",
+                    "parent_tool_use_id": tool_call.get("id", ""),
+                    "name": tool_call.get("name", ""),
+                    "args": tool_call.get("args", {}),
+                    "content": result,
+                    "synthetic": True,
+                    "created_at": now(),
+                }
+            )
+            # synthetic tool result 虽然没有真实执行，但在审计时间线上仍然应该有对应的 tool_executed 事件；
+            # 否则 trace 会比 history 少一段，后续无法解释“为什么这个 tool_use 没有执行”。
+            self.emit_tool_executed_trace(
+                task_state,
+                tool_call,
+                result,
+                duration_ms=0,
+                batch_index=start_index + offset,
+                batch_size=batch_size,
+                synthetic=True,
+                skip_reason=reason,
+            )
+
+    def emit_tool_executed_trace(
+        self,
+        task_state,
+        tool_call,
+        result,
+        duration_ms,
+        batch_index,
+        batch_size,
+        synthetic=False,
+        skip_reason="",
+    ):
+        """统一写入单个 tool result 的 trace，保证真实执行和 synthetic 补结果字段一致。"""
+        tool_metadata = (
+            {
+                "tool_status": "synthetic_skipped",
+                "tool_error_code": "synthetic_skipped",
+                "security_event_type": "",
+                "risk_level": "",
+                "read_only": None,
+                "affected_paths": [],
+                "workspace_changed": False,
+                "diff_summary": [],
+            }
+            if synthetic
+            else dict(self._last_tool_result_metadata or {})
+        )
+        payload = {
+            "tool_use_id": tool_call.get("id", ""),
+            "name": tool_call.get("name", ""),
+            "args": tool_call.get("args", {}),
+            "batch_index": int(batch_index),
+            "batch_size": int(batch_size),
+            "synthetic": bool(synthetic),
+            "skip_reason": str(skip_reason or ""),
+            "result": clip(result, 500),
+            "duration_ms": int(duration_ms),
+            **tool_metadata,
+        }
+        self.emit_trace(task_state, "tool_executed", payload)
 
 
     '''下面是和敏感环境变量相关的几个函数,主要是为了在trace和report中对敏感环境变量进行脱敏处理,以及提供一个接口让用户显式配置哪些环境变量是敏感的'''
@@ -1078,70 +1163,125 @@ class Hepilot:
             self.last_completion_metadata = completion_metadata
             self.last_prompt_metadata = prompt_metadata
 
-            #kind：模型输出被解析后的控制类型，可能是 "tool"、"final"、"retry"。
-            #payload：和这个类型对应的数据；工具调用时是工具 payload，最终回答时是文本，重试时是格式纠错提示。
+            #kind：模型输出被解析后的控制类型，可能是 "tool"、"tool_batch"、"final"、"retry"。
+            #payload：和这个类型对应的数据；工具调用时是单个 payload 或批量 payload，最终回答时是文本，重试时是格式纠错提示。
             kind, payload = self.parse(raw)
             # 记录这次模型输出被解析成了哪种动作，以及模型调用耗时和 completion 元数据。
-            self.emit_trace(
-                task_state,
-                "model_parsed",
-                {
-                    "kind": kind,
-                    "completion_metadata": completion_metadata,
-                    "duration_ms": int((time.monotonic() - model_started_at) * 1000),
-                },
-            )
-            #如果判断本次调用为工具调用
-            if kind == "tool":
-                #将工具的调用次数+1
-                tool_steps += 1
-                name = payload.get("name", "")
-                args = payload.get("args", {})
-                # 先把模型原始 tool call 回写到 history，保证下一轮能看到完整因果链。
-                self.record({"role": "assistant", "content": raw, "created_at": now()})
-                #记录状态机中工具调用的相关信息,以供后续流程使用
-                task_state.record_tool(name)
-                #记录工具调用开始的时间戳
-                tool_started_at = time.monotonic()
-                #工具执行的核心函数,传入工具名称和参数,返回工具执行结果
-                result = self.run_tool(name, args)
-                # 把这次工具调用的名称、参数和结果写进 session history，后续 history 压缩和恢复上下文都会用到。
+            # model_parsed 对多工具批次要额外记录 tool_use 摘要；
+            # 这样后续排查时能直接从 trace 看出“这一轮 assistant 解析出了哪几个工具”。
+            parsed_trace_payload = {
+                "kind": kind,
+                "completion_metadata": completion_metadata,
+                "duration_ms": int((time.monotonic() - model_started_at) * 1000),
+            }
+            if kind == "tool_batch":
+                parsed_trace_payload["tool_use_count"] = len(payload)
+                parsed_trace_payload["tool_uses"] = [
+                    {
+                        "id": tool_call.get("id", ""),
+                        "name": tool_call.get("name", ""),
+                    }
+                    for tool_call in payload
+                ]
+            elif kind == "tool":
+                parsed_trace_payload["tool_use_count"] = 1
+                parsed_trace_payload["tool_uses"] = [
+                    {
+                        "id": payload.get("id", ""),
+                        "name": payload.get("name", ""),
+                    }
+                ]
+            self.emit_trace(task_state, "model_parsed", parsed_trace_payload)
+            # 先让 ask() 同时接受单工具和批量工具两种解析结果；
+            # 这样下一步 parse() 切到 tool_batch 时，主循环仍然是可运行的。
+            if kind in {"tool", "tool_batch"}:
+                tool_calls = payload if kind == "tool_batch" else [payload]
+                batch_size = len(tool_calls)
+                # 除了原始文本外，再把本轮解析出的 tool_use 摘要落进 history，
+                # 后续 transcript、恢复和 synthetic result 都基于这些 id 做稳定配对。
                 self.record(
                     {
-                        "role": "tool",
-                        "name": name,
-                        "args": args,
-                        "content": result,
+                        "role": "assistant",
+                        "content": raw,
+                        "tool_uses": [
+                            {
+                                "id": tool_call.get("id", ""),
+                                "name": tool_call.get("name", ""),
+                                "args": tool_call.get("args", {}),
+                            }
+                            for tool_call in tool_calls
+                        ],
                         "created_at": now(),
                     }
                 )
-                #模型执行完了之后将刚才task_state.record_tool(name)的执行结果落盘存到task_state中
-                self.run_store.write_task_state(task_state)
-                #再追加一条trace,代表tool执行完毕,记录工具执行的相关信息和耗时,以及工具执行结果的元数据
-                self.emit_trace(
-                    task_state,
-                    "tool_executed",
-                    {
-                        "name": name,
-                        "args": args,
-                        "result": clip(result, 500),
-                        "duration_ms": int((time.monotonic() - tool_started_at) * 1000),
-                        **dict(self._last_tool_result_metadata or {}),
-                    },
-                )
-                #创建一个checkpoint,记录工具执行完毕的状态,以供后续恢复使用
-                checkpoint = self.create_checkpoint(task_state, user_message, trigger="tool_executed")
-                #落盘状态机,这一次的落盘是为了刚才create checkpoint过程中task_state.checkpoint_id = checkpoint_id这个状态的改变
-                self.run_store.write_task_state(task_state)
-                #再记录一条trace,代表checkpoint的创建,记录checkpoint的相关信息和创建原因
-                self.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "tool_executed",
-                    },
-                )
+                for index, tool_call in enumerate(tool_calls):
+                    # 单轮多工具仍然受全局 step limit 限制；一旦本轮剩余预算耗尽，就给后续工具补 synthetic result，
+                    # 明确告诉下一轮“这些工具没有被执行”，而不是静默丢失。
+                    if tool_steps >= self.max_steps:
+                        self.record_synthetic_tool_results(
+                            task_state,
+                            tool_calls[index:],
+                            "step limit reached before execution",
+                            batch_size=batch_size,
+                            start_index=index,
+                        )
+                        break
+                    #将工具的调用次数+1
+                    tool_steps += 1
+                    name = tool_call.get("name", "")
+                    args = tool_call.get("args", {})
+                    #记录状态机中工具调用的相关信息,以供后续流程使用
+                    task_state.record_tool(name)
+                    #记录工具调用开始的时间戳
+                    tool_started_at = time.monotonic()
+                    #工具执行的核心函数,传入工具名称和参数,返回工具执行结果
+                    result = self.run_tool(name, args)
+                    # 把这次工具调用的名称、参数和结果写进 session history，后续 history 压缩和恢复上下文都会用到。
+                    self.record(
+                        {
+                            "role": "tool",
+                            "parent_tool_use_id": tool_call.get("id", ""),
+                            "name": name,
+                            "args": args,
+                            "content": result,
+                            "created_at": now(),
+                        }
+                    )
+                    #模型执行完了之后将刚才task_state.record_tool(name)的执行结果落盘存到task_state中
+                    self.run_store.write_task_state(task_state)
+                    #再追加一条trace,代表tool执行完毕,记录工具执行的相关信息和耗时,以及工具执行结果的元数据
+                    self.emit_tool_executed_trace(
+                        task_state,
+                        tool_call,
+                        result,
+                        duration_ms=int((time.monotonic() - tool_started_at) * 1000),
+                        batch_index=index,
+                        batch_size=batch_size,
+                    )
+                    #创建一个checkpoint,记录工具执行完毕的状态,以供后续恢复使用
+                    checkpoint = self.create_checkpoint(task_state, user_message, trigger="tool_executed")
+                    #落盘状态机,这一次的落盘是为了刚才create checkpoint过程中task_state.checkpoint_id = checkpoint_id这个状态的改变
+                    self.run_store.write_task_state(task_state)
+                    #再记录一条trace,代表checkpoint的创建,记录checkpoint的相关信息和创建原因
+                    self.emit_trace(
+                        task_state,
+                        "checkpoint_created",
+                        {
+                            "checkpoint_id": checkpoint["checkpoint_id"],
+                            "trigger": "tool_executed",
+                        },
+                    )
+                    # 第一版多工具批处理采用“失败即截断”策略；这样可以避免模型在看到前一工具失败后，
+                    # 仍然让后一工具继续执行，导致同一批里出现难以解释的半成功状态。
+                    if str(self._last_tool_result_metadata.get("tool_status", "")).strip() != "ok":
+                        self.record_synthetic_tool_results(
+                            task_state,
+                            tool_calls[index + 1:],
+                            f"previous tool {name} did not complete successfully",
+                            batch_size=batch_size,
+                            start_index=index + 1,
+                        )
+                        break
                 continue
 
             if kind == "retry":
@@ -1482,7 +1622,7 @@ class Hepilot:
 
         输入 / 输出：
         - 输入：模型返回的原始文本 `raw`
-        - 输出：`(kind, payload)`，其中 `kind` 可能是 `tool`、`final`、`retry`
+        - 输出：`(kind, payload)`，其中 `kind` 可能是 `tool_batch`、`final`、`retry`
 
         在 agent 链路里的位置：
         它位于 `model_client.complete()` 之后、`run_tool()` 之前，是模型输出
@@ -1493,42 +1633,27 @@ class Hepilot:
         # 1. <tool>...</tool> 里包 JSON，适合简短调用
         # 2. XML 风格属性/子标签，适合写文件这类多行内容
 
-        #如果将这次kind定义为tool,首先要满足的第一个条件是，必须有 <tool> 标签
-        #其次第二个条件是<tool> 比 <final> 更靠前，或者根本没有 <final>
-        #那就把这段输出当成工具调用来解析
-        if "<tool>" in raw and ("<final>" not in raw or raw.find("<tool>") < raw.find("<final>")):
-            #将具体的<tool>标签内容取出来
-            body = Hepilot.extract(raw, "tool")
-            try:
-                #尝试将json解析成字典
-                payload = json.loads(body)
-            except Exception:
-                #解析json失败就定义为重试和提示:模型返回了格式错误的工具JSON
-                return "retry", Hepilot.retry_notice("model returned malformed tool JSON")
-            if not isinstance(payload, dict):
-                #如果解析出来但是不是dict就定义为重试和提示:模型返回了格式错误的工具JSON
-                return "retry", Hepilot.retry_notice("tool payload must be a JSON object")
-            if not str(payload.get("name", "")).strip():
-                #如果解析出来但是没有name字段就定义为重试和提示:模型返回了格式正确的工具JSON,但是缺少工具名称
-                return "retry", Hepilot.retry_notice("tool payload is missing a tool name")
-            #从解析出来的dict中解析出参数的dict
-            args = payload.get("args", {})
-            #如果参数字段不存在就定义为空字典,可能不需要参数
-            if args is None:
-                payload["args"] = {}
-            #但是如果参数不是dict的格式,那就重试,提示为默认提示
-            elif not isinstance(args, dict):
-                return "retry", Hepilot.retry_notice()
-            return "tool", payload
-        
-        #这一段是在处理第二种工具调用格式：不是 <tool>JSON</tool>，而是 XML 风格的 <tool ...>...</tool>
+        # 先把整段回复里的所有 tool block 按顺序切出来，再逐个解析；
+        # 这样一轮回复里即使出现多个工具调用，也能作为一个 assistant turn 的批次处理。
         if "<tool" in raw and ("<final>" not in raw or raw.find("<tool") < raw.find("<final>")):
-            payload = Hepilot.parse_xml_tool(raw)
-            if payload is not None:
-                #如果返回的值存在,那就直接返回payload
-                return "tool", payload
-            #前一行没返回代表模型输出格式有问题
-            return "retry", Hepilot.retry_notice()
+            blocks = Hepilot.extract_tool_blocks(raw)
+            if not blocks:
+                return "retry", Hepilot.retry_notice()
+            tool_calls = []
+            for block in blocks:
+                payload, problem = Hepilot.parse_tool_block(block)
+                if payload is None:
+                    return "retry", Hepilot.retry_notice(problem or None)
+                # 在解析阶段就为每个 tool call 分配稳定 id，后续 history / tool result
+                # 都用这条 id 建立配对关系，而不是再依赖“第几个工具”的隐式顺序。
+                tool_calls.append(
+                    {
+                        "id": "toolu_" + uuid.uuid4().hex,
+                        "name": payload["name"],
+                        "args": payload.get("args", {}),
+                    }
+                )
+            return "tool_batch", tool_calls
         
         #这一段是在处理最终输出
         if "<final>" in raw:
@@ -1557,6 +1682,54 @@ class Hepilot:
             f"{prefix}. Reply with a valid <tool> call or a non-empty <final> answer. "
             'For multi-line files, prefer <tool name="write_file" path="file.py"><content>...</content></tool>.'
         )
+
+    @staticmethod
+    def extract_tool_blocks(raw):
+        """按出现顺序提取回复里的所有 `<tool>...</tool>` 片段。
+
+        这里先只负责“切块”，不负责校验 payload，也不区分 JSON/XML 风格。
+        后续 parse() 切到多工具协议时，会基于这些片段逐个解析并分配 tool_use_id。
+        """
+        raw = str(raw)
+        blocks = []
+        start = 0
+        while True:
+            open_index = raw.find("<tool", start)
+            if open_index == -1:
+                break
+            close_index = raw.find("</tool>", open_index)
+            if close_index == -1:
+                return []
+            close_index += len("</tool>")
+            blocks.append(raw[open_index:close_index])
+            start = close_index
+        return blocks
+
+    @staticmethod
+    def parse_tool_block(block):
+        """解析单个 `<tool>` 片段，兼容 JSON 和 XML 两种工具格式。"""
+        block = str(block)
+        if block.startswith("<tool>"):
+            body = Hepilot.extract(block, "tool")
+            try:
+                payload = json.loads(body)
+            except Exception:
+                return None, "model returned malformed tool JSON"
+            if not isinstance(payload, dict):
+                return None, "tool payload must be a JSON object"
+            if not str(payload.get("name", "")).strip():
+                return None, "tool payload is missing a tool name"
+            args = payload.get("args", {})
+            if args is None:
+                payload["args"] = {}
+            elif not isinstance(args, dict):
+                return None, ""
+            return payload, ""
+
+        payload = Hepilot.parse_xml_tool(block)
+        if payload is not None:
+            return payload, ""
+        return None, ""
 
     @staticmethod
     def parse_xml_tool(raw):
