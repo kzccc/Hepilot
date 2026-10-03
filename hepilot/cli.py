@@ -14,8 +14,19 @@ from pathlib import Path
 import tomllib
  
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
-from .runtime import Hepilot, SessionStore
+from .runtime import Hepilot, SessionStore, record_resume_failure
 from .workspace import WorkspaceContext, middle
+
+
+class AgentStartupError(RuntimeError):
+    """启动阶段失败，且这次失败已经落成受控运行工件。
+
+    为什么存在：
+    恢复 session 失败时还没有 agent 实例，失败信息只能通过异常上抛。
+    用这个专用类型，调用方才能区分“已知的、已经收口好的启动失败”和
+    “真正的意外异常”：前者给用户看一句干净的话，后者才该暴露 traceback。
+    """
+
 
 DEFAULT_SECRET_ENV_NAMES = (
     "OPENAI_API_KEY",
@@ -269,6 +280,11 @@ def build_agent(args):
     - 输入：`argparse` 解析后的 `args`
     - 输出：一个新的 `Hepilot`，或一个从旧 session 恢复出来的 `Hepilot`
 
+    失败路径：
+    如果用户要求恢复 session 但恢复不了（session 不存在、文件损坏，或者
+    `--resume latest` 却一个 session 都没有），这里不会让原始异常直接抛穿：
+    先把失败写成 task_state / trace / report 工件，再抛 `AgentStartupError`。
+
     在 agent 链路里的位置：
     它是整个程序启动链路里最靠近 runtime 的装配点。`main()` 先调它，
     得到 agent 后，后面无论是 one-shot 还是 REPL 模式，都会落到 `ask()`。
@@ -283,17 +299,40 @@ def build_agent(args):
     session_id = args.resume
     if session_id == "latest":
         session_id = store.latest()
+        if not session_id:
+            # 用户明确要求“恢复最近的会话”，却一个 session 都没有。
+            # 这里不能静默开一个新会话：那会让用户以为在续跑，实际是全新的，
+            # 而且没有任何提示。所以按受控失败处理，并留下可复盘的工件。
+            run_dir, message = record_resume_failure(
+                workspace,
+                "latest",
+                FileNotFoundError(f"no saved sessions under {store.root}"),
+                secret_env_names=configured_secret_names,
+            )
+            raise AgentStartupError(f"{message}\nFailure artifacts: {run_dir}")
     if session_id:
-        return Hepilot.from_session(
-            model_client=model,
-            workspace=workspace,
-            session_store=store,
-            session_id=session_id,
-            approval_policy=args.approval,
-            max_steps=args.max_steps,
-            max_new_tokens=args.max_new_tokens,
-            secret_env_names=configured_secret_names,
-        )
+        try:
+            return Hepilot.from_session(
+                model_client=model,
+                workspace=workspace,
+                session_store=store,
+                session_id=session_id,
+                approval_policy=args.approval,
+                max_steps=args.max_steps,
+                max_new_tokens=args.max_new_tokens,
+                secret_env_names=configured_secret_names,
+            )
+        except Exception as exc:
+            # 恢复失败同样要按“受控失败”收口：写状态机、trace、report，
+            # 然后抛一个专用错误类型，由 main() 用干净的消息结束进程，
+            # 而不是让 traceback 崩到终端、磁盘上什么都不留。
+            run_dir, message = record_resume_failure(
+                workspace,
+                session_id,
+                exc,
+                secret_env_names=configured_secret_names,
+            )
+            raise AgentStartupError(f"{message}\nFailure artifacts: {run_dir}") from exc
     return Hepilot(
         model_client=model,
         workspace=workspace,
@@ -342,7 +381,13 @@ def build_arg_parser():
 def main(argv=None):
     """CLI 总入口，负责 one-shot 与 REPL 两种运行模式切换。"""
     args = build_arg_parser().parse_args(argv)
-    agent = build_agent(args)
+    try:
+        agent = build_agent(args)
+    except AgentStartupError as exc:
+        # 启动失败已经写成受控运行工件，这里只负责用一句干净的话收口，
+        # 不再把 traceback 抛给用户。
+        print(str(exc), file=sys.stderr)
+        return 1
 
     model = getattr(agent.model_client, "model", getattr(args, "model", DEFAULT_OLLAMA_MODEL))
     host = getattr(agent.model_client, "host", getattr(agent.model_client, "base_url", getattr(args, "host", DEFAULT_OLLAMA_HOST)))

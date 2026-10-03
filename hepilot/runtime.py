@@ -18,7 +18,7 @@ from pathlib import Path
 from . import memory as memorylib
 from .context_manager import ContextManager
 from .run_store import RunStore
-from .task_state import TaskState
+from .task_state import STATUS_FAILED, STOP_REASON_RESUME_LOAD_ERROR, TaskState
 from . import tools as toolkit
 from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
 
@@ -56,6 +56,76 @@ DURABLE_MEMORY_LINE_PATTERNS = (
     ("user-preferences", re.compile(r"^偏好：\s*(.+)$")),
 )
 SECRET_SHAPED_TEXT_PATTERN = re.compile(r"(?i)(\b(api[_ -]?key|token|secret|password)\b|sk-[A-Za-z0-9_-]{6,})")
+
+
+# 下面这组脱敏函数是模块级的，而不是 Hepilot 的实例方法。
+# 原因：启动阶段的失败（例如 resume 读 session 失败）发生在 Hepilot 实例
+# 被构造出来之前，此时没有 self，但一样需要脱敏后才能落盘。
+# Hepilot 上保留同名方法作为绑定版本，实例侧的调用方式不变。
+def _looks_sensitive_env_name(name):
+    """基于名称模式判断环境变量是否像敏感项。"""
+    upper = str(name).upper()
+    # 三种模糊匹配：完全相等、以 marker 结尾、以 _marker 结尾。
+    return any(upper == marker or upper.endswith(marker) or upper.endswith(f"_{marker}") for marker in SENSITIVE_ENV_NAME_MARKERS)
+
+
+def _is_secret_env_name(name, secret_env_names):
+    """判断环境变量名是否敏感（显式名单 + 名称模式）。"""
+    upper = str(name).upper()
+    return upper in set(secret_env_names or ()) or _looks_sensitive_env_name(upper)
+
+
+def _configured_secret_env_items(secret_env_names):
+    """返回显式配置的敏感环境变量及其当前值。"""
+    configured = set(secret_env_names or ())
+    items = [
+        (name, value)
+        for name, value in os.environ.items()
+        if str(name).upper() in configured and value
+    ]
+    items.sort(key=lambda item: item[0])
+    return items
+
+
+def _detected_secret_env_items(secret_env_names):
+    """扫描环境变量名，找出名称上疑似敏感的变量及其当前值。"""
+    items = [
+        (name, value)
+        for name, value in os.environ.items()
+        if _is_secret_env_name(name, secret_env_names) and value
+    ]
+    # 按变量名排序，保证返回值确定，方便上层比较和测试。
+    items.sort(key=lambda item: item[0])
+    return items
+
+
+def _redact_text(text, secret_env_names):
+    """对文本中的敏感环境变量值做统一脱敏。"""
+    text = str(text)
+    # 按 value 长度从长到短替换：若短值恰好是长值的子串，
+    # 先替换短值会把长值切碎，导致长值无法被完整替换。
+    for _, value in sorted(_detected_secret_env_items(secret_env_names), key=lambda item: len(item[1]), reverse=True):
+        text = text.replace(value, REDACTED_VALUE)
+    return text
+
+
+def _redact_artifact(value, secret_env_names, key=None):
+    """递归脱敏报告、trace 等结构化工件。"""
+    # 最本质的规则：字段名本身敏感时，整个字段值都不落盘。
+    if key and _is_secret_env_name(key, secret_env_names):
+        return REDACTED_VALUE
+    if isinstance(value, dict):
+        return {
+            str(item_key): _redact_artifact(item_value, secret_env_names, key=item_key)
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_artifact(item, secret_env_names, key=key) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_artifact(item, secret_env_names, key=key) for item in value]
+    if isinstance(value, str):
+        return _redact_text(value, secret_env_names)
+    return value
 
 
 @dataclass
@@ -620,42 +690,22 @@ class Hepilot:
         self.emit_trace(task_state, "tool_executed", payload)
 
 
-    '''下面是和敏感环境变量相关的几个函数,主要是为了在trace和report中对敏感环境变量进行脱敏处理,以及提供一个接口让用户显式配置哪些环境变量是敏感的'''
-    @staticmethod
-    def looks_sensitive_env_name(name):
-        """基于名称模式判断环境变量是否像敏感项。"""
-        upper = str(name).upper()
-        #实际上就是三种模糊匹配方式
-        return any(upper == marker or upper.endswith(marker) or upper.endswith(f"_{marker}") for marker in SENSITIVE_ENV_NAME_MARKERS)
+    # 下面这组方法只是模块级脱敏函数的“绑定版本”，实现都在模块顶部。
+    # 这样启动失败路径（那时还没有 agent 实例）和实例路径共用同一套脱敏
+    # 规则，不会留下两份会各自漂移的脱敏逻辑。
+    looks_sensitive_env_name = staticmethod(_looks_sensitive_env_name)
 
     def is_secret_env_name(self, name):
         """判断环境变量名是否应被视为敏感。"""
-        #这段代码的逻辑就是对传入的name(key)进行判断敏感性与否
-        upper = str(name).upper()
-        #判断的依据是依次转换为大写后,通过提前设定好的敏感变量名列表和模糊匹配模式
-        return upper in self.secret_env_names or self.looks_sensitive_env_name(upper)
+        return _is_secret_env_name(name, self.secret_env_names)
 
     def configured_secret_env_items(self):
         """返回显式配置的敏感环境变量及其当前值。"""
-        items = [
-            (name, value)
-            for name, value in os.environ.items()
-            if str(name).upper() in self.secret_env_names and value
-        ]
-        items.sort(key=lambda item: item[0])
-        return items
+        return _configured_secret_env_items(self.secret_env_names)
 
     def detected_secret_env_items(self):
         """扫描环境变量名，找出名称上疑似敏感的变量。"""
-        # 扫描当前进程全部环境变量，挑出名称像敏感变量 + 值非空的
-        items = [
-            (name, value)
-            for name, value in os.environ.items()
-            if self.is_secret_env_name(name) and value  # 名称命中（显式配置或模式匹配）且值不为空
-        ]
-        # 按变量名排序，保证返回值确定，方便上层比较和测试
-        items.sort(key=lambda item: item[0])
-        return items
+        return _detected_secret_env_items(self.secret_env_names)
 
     def secret_env_summary(self):
         """返回显式配置敏感环境变量的简表。"""
@@ -675,41 +725,11 @@ class Hepilot:
 
     def redact_text(self, text):
         """对文本中的显式 secret 值做统一脱敏。"""
-        text = str(text)
-        #self.detected_secret_env_items()这个函数返回的是一个列表，列表的元素是敏感环境变量的名称和值
-        #按照列表中每个value值的长度进行排序的，从长到短
-        #然后依次遍历这些value值,在文本中将它们替换为REDACTED_VALUE,这样就可以保证无论这个敏感环境变量的值是什么样子的,只要它出现在文本中,都会被替换为REDACTED_VALUE,从而达到脱敏的目的
-        #那从长到短的排序是为了防止某些敏感环境变量的值是另一些敏感环境变量值的子串的情况,如果不排序,就可能先把短的那个子串替换了,导致长的那个敏感环境变量值无法被正确替换掉
-        for _, value in sorted(self.detected_secret_env_items(), key=lambda item: len(item[1]), reverse=True):
-            text = text.replace(value, REDACTED_VALUE)
-        return text
+        return _redact_text(text, self.secret_env_names)
 
     def redact_artifact(self, value, key=None):
         """递归脱敏报告、trace 等结构化工件。"""
-        #首先解释一下这个key是什么东西,这个是检查dict或者其他各种类型的key，如果key是敏感的，就返回REDACTED_VALUE
-        #但是调用redact_artifact的时候，第一层一般是emit_trace和report的时候调用
-        #传入的value顶层结构是 trace 事件的字段名（payload, event、task_id、tool_steps 等），不可能是敏感 key，所以不需要判定。
-        #但是顶层字段下面的字段名就需要判断,于是每一个字段都再次递归调用redact_artifact判断,如果字段名是敏感的就返回REDACTED_VALUE,不需要继续递归了
-        #如果不是的话,这个字段下面还有结构,就继续递归调用,如果不是,就到最后按照原样返回value就可以了
-        if key and self.is_secret_env_name(key):
-            #如果这里if key判断通过就说明是递归进来的dict或者有下层结构的类型了,这里是对他的某一个下层字段在判断是否敏感,需要对key进行敏感判断,如果key是敏感的就直接返回REDACTED_VALUE,不需要继续递归了
-            #所以其实这里就是redact_artifact最本质的逻辑了,如果key是敏感的就直接返回REDACTED_VALUE,不需要继续递归了
-            #其他的代码段只是为了继续递归下去
-            return REDACTED_VALUE
-        if isinstance(value, dict):
-            return {
-                str(item_key): self.redact_artifact(item_value, key=item_key)
-                for item_key, item_value in value.items()
-            }
-        if isinstance(value, list):
-            #这里的key沿用的是上面那个key
-            return [self.redact_artifact(item, key=key) for item in value]
-        if isinstance(value, tuple):
-            return [self.redact_artifact(item, key=key) for item in value]
-        if isinstance(value, str):
-            redacted = self.redact_text(value)
-            return redacted
-        return value
+        return _redact_artifact(value, self.secret_env_names, key=key)
 
     def shell_env(self):
         """只暴露白名单环境变量给 shell 工具。"""
@@ -1908,6 +1928,94 @@ class Hepilot:
         if os.path.commonpath([str(self.root), str(resolved)]) != str(self.root):
             raise ValueError(f"path escapes workspace: {raw_path}")
         return resolved
+
+
+def record_resume_failure(workspace, session_id, exc, secret_env_names=None):
+    """把 session 恢复失败收口成一次受控的失败运行工件。
+
+    为什么存在：
+    恢复失败发生在 `Hepilot.__init__` 之前，此刻既没有 agent 实例，
+    也没有已经开好的 run 目录。如果直接让异常抛穿 CLI，进程会崩出
+    traceback，而且 `.hepilot/runs/` 下不会留下任何可复盘的痕迹。
+    这个函数在“实例还不存在”的前提下，自己把失败写成一整套工件。
+
+    输入 / 输出：
+    - 输入：workspace 快照、请求恢复的 session_id、原始异常、敏感变量名单
+    - 输出：`(run_dir, final_answer)`
+
+    在 agent 链路里的位置：
+    它是启动阶段的失败收口点，对应运行阶段的 `finish_run_with_model_error`。
+    """
+    message = str(exc).strip() or exc.__class__.__name__
+    final = f"Could not resume session '{session_id}': {message}"
+    run_started_at = time.monotonic()
+
+    task_state = TaskState.create(
+        task_id=Hepilot.new_task_id(),
+        user_request=f"resume:{session_id}",
+    )
+    # 状态机直接落成失败态。stop_reason 复用 task_state 里既有的恢复失败分类，
+    # 这样统计口径里“恢复失败”不会和“模型调用失败”混在一起。
+    task_state.stop(STOP_REASON_RESUME_LOAD_ERROR, status=STATUS_FAILED, final_answer=final)
+    # resume_status 保持为空：这一轮根本没走到 checkpoint 评估，不该伪造一个评估结果。
+    run_store = RunStore(Path(workspace.repo_root) / ".hepilot" / "runs")
+    run_dir = run_store.start_run(task_state)
+
+    def emit_trace(event, payload):
+        # 和 Hepilot.emit_trace 保持同一套落盘约定：先脱敏，再补 event/created_at。
+        body = _redact_artifact(payload or {}, secret_env_names)
+        body["event"] = event
+        body["created_at"] = now()
+        run_store.append_trace(task_state, body)
+
+    emit_trace(
+        "resume_failed",
+        {
+            "requested_session_id": str(session_id),
+            "sessions_dir": str(Path(workspace.repo_root) / ".hepilot" / "sessions"),
+            "error_type": exc.__class__.__name__,
+            "error_message": message,
+        },
+    )
+    emit_trace(
+        "run_finished",
+        {
+            "status": task_state.status,
+            "stop_reason": task_state.stop_reason,
+            "final_answer": final,
+            "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
+        },
+    )
+
+    secret_names = [name for name, _ in _detected_secret_env_items(secret_env_names)]
+    report = {
+        "run_id": task_state.run_id,
+        "task_id": task_state.task_id,
+        "status": task_state.status,
+        "stop_reason": task_state.stop_reason,
+        "final_answer": final,
+        "tool_steps": task_state.tool_steps,
+        "attempts": task_state.attempts,
+        "checkpoint_id": task_state.checkpoint_id,
+        "resume_status": task_state.resume_status,
+        "task_state": task_state.to_dict(),
+        "prompt_metadata": {},
+        "durable_promotions": [],
+        "durable_rejections": [],
+        "durable_superseded": [],
+        # 下面几个字段让“启动阶段失败”在报告里一眼可辨，
+        # 而不是被当成一次普通的空运行。
+        "failed_stage": "resume",
+        "requested_session_id": str(session_id),
+        "error_type": exc.__class__.__name__,
+        "error_message": message,
+        "redacted_env": {
+            "secret_env_count": len(secret_names),
+            "secret_env_names": secret_names,
+        },
+    }
+    run_store.write_report(task_state, _redact_artifact(report, secret_env_names))
+    return run_dir, final
 
 
 MiniAgent = Hepilot
