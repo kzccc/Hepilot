@@ -1,0 +1,5 @@
+version: 1
+interface:
+  display_name: Learn Claude Code
+  short_description: 用本地 Claude-Code 源码和指定资料学习 Claude Code，并提炼对 Hepilot 的启发。
+  default_prompt: 分析 Claude Code 的实现，并给出对 Hepilot 的改进启发。
