@@ -17,8 +17,11 @@
     --accent: #1f6feb;
     --accent-soft: #eaf1fe;
     --ok: #1a7f37;
+    --ok-soft: #f0f9f2;
     --warn: #9a6700;
+    --warn-soft: #fffaef;
     --err: #cf222e;
+    --err-soft: #fff5f5;
     --shadow: 0 1px 2px rgba(27, 31, 36, .06), 0 3px 8px rgba(27, 31, 36, .04);
     --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -36,211 +39,178 @@
   ::-webkit-scrollbar-thumb:hover { background: #c6cdd5; }
   ::-webkit-scrollbar-track { background: transparent; }
 
-  .app { display: grid; grid-template-columns: 272px 1fr; height: 100vh; }
+  .app { display: grid; grid-template-columns: 278px 1fr; height: 100vh; }
 
-  /* ---- sidebar ---- */
-  .side {
-    background: var(--panel); border-right: 1px solid var(--border);
-    display: flex; flex-direction: column; min-height: 0;
-  }
-  .brand {
-    display: flex; align-items: center; gap: 8px;
-    padding: 16px 16px 12px; font-weight: 600; letter-spacing: .2px;
-  }
+  /* ---------------- sidebar ---------------- */
+  .side { background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 16px 16px 10px; font-weight: 600; }
   .brand .dot { width: 8px; height: 8px; border-radius: 2px; background: var(--fg); }
   .brand-sub { font-size: 11px; color: var(--faint); font-weight: 400; margin-left: auto; font-family: var(--mono); }
 
   .new-btn {
-    margin: 0 12px 12px; padding: 9px 12px; border-radius: 8px;
+    margin: 0 12px 10px; padding: 9px 12px; border-radius: 8px;
     background: var(--fg); color: #fff; border: none; font-weight: 500;
     display: flex; align-items: center; justify-content: center; gap: 6px;
-    transition: opacity .15s;
   }
   .new-btn:hover { opacity: .87; }
+  .new-btn:disabled { opacity: .5; cursor: wait; }
 
-  .group-label {
-    padding: 10px 16px 4px; font-size: 11px; color: var(--faint);
-    text-transform: uppercase; letter-spacing: .8px; font-family: var(--mono);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  .search-box { margin: 0 12px 8px; }
+  .search-box input {
+    width: 100%; background: #fff; border: 1px solid var(--border); border-radius: 7px;
+    padding: 6px 9px; font-size: 12px; font-family: var(--sans); color: var(--fg); outline: none;
   }
+  .search-box input:focus { border-color: #b6cdf7; box-shadow: 0 0 0 3px var(--accent-soft); }
+
   .sessions { flex: 1; overflow-y: auto; padding-bottom: 12px; }
-  .session {
-    margin: 2px 8px; padding: 8px 10px; border-radius: 7px;
-    cursor: pointer; border: 1px solid transparent;
+
+  .group-head {
+    display: flex; align-items: center; gap: 6px; padding: 8px 12px 4px;
+    font-size: 11px; color: var(--faint); font-family: var(--mono);
+    cursor: pointer; user-select: none; white-space: nowrap;
   }
+  .group-head:hover { color: var(--dim); }
+  .group-head .caret { width: 10px; display: inline-block; }
+  .group-head .gpath { overflow: hidden; text-overflow: ellipsis; }
+  .group-head .count { margin-left: auto; opacity: .7; }
+
+  .session { margin: 1px 8px; padding: 6px 9px; border-radius: 7px; cursor: pointer; border: 1px solid transparent; }
   .session:hover { background: var(--panel-2); }
   .session.active { background: var(--accent-soft); border-color: #cfe0fb; }
-  .session .t { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .session .m { font-size: 11px; color: var(--faint); font-family: var(--mono); margin-top: 2px; }
-  .badge { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 10px; font-family: var(--mono); }
-  .badge.running { background: #fff6e0; color: var(--warn); }
-  .badge.interrupted { background: #ffebe9; color: var(--err); }
-
-  /* ---- main ---- */
-  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  .topbar {
-    height: 48px; display: flex; align-items: center; gap: 10px;
-    padding: 0 20px; border-bottom: 1px solid var(--border); flex: 0 0 auto;
+  .session .row1 { display: flex; align-items: center; gap: 6px; }
+  .session .t { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  .session .m { font-size: 11px; color: var(--faint); font-family: var(--mono); margin-top: 1px; }
+  .session input.rename {
+    width: 100%; border: 1px solid var(--accent); border-radius: 4px;
+    padding: 1px 5px; font-size: 13px; font-family: var(--sans); outline: none;
   }
-  .topbar .title { font-weight: 500; }
+  .badge { display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 10px; font-family: var(--mono); }
+  .badge.running { background: var(--warn-soft); color: var(--warn); }
+  .badge.interrupted { background: var(--err-soft); color: var(--err); }
+
+  /* ---------------- main ---------------- */
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .topbar { height: 50px; display: flex; align-items: center; gap: 12px; padding: 0 20px; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
+  .tabs { display: flex; gap: 2px; background: var(--panel-2); padding: 2px; border-radius: 8px; }
+  .tab { border: none; background: transparent; padding: 5px 14px; border-radius: 6px; color: var(--dim); font-size: 13px; }
+  .tab.active { background: #fff; color: var(--fg); box-shadow: var(--shadow); font-weight: 500; }
+  .topbar .title { font-weight: 500; font-size: 14px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chip {
     font-family: var(--mono); font-size: 11px; color: var(--dim);
-    background: var(--panel-2); border: 1px solid var(--border);
+    background: var(--panel); border: 1px solid var(--border);
     padding: 2px 8px; border-radius: 5px; white-space: nowrap;
     max-width: 420px; overflow: hidden; text-overflow: ellipsis;
   }
   .spacer { flex: 1; }
+  .ghost { border: 1px solid var(--border); background: #fff; border-radius: 7px; padding: 4px 10px; font-size: 12px; color: var(--dim); }
+  .ghost:hover { background: var(--panel-2); color: var(--fg); }
 
-  .stream { flex: 1; overflow-y: auto; padding: 22px 0 8px; }
-  .wrap { max-width: 820px; margin: 0 auto; padding: 0 24px; }
+  .pane { flex: 1; overflow-y: auto; min-height: 0; }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 22px 24px 40px; }
 
-  .empty {
-    height: 100%; display: flex; flex-direction: column; align-items: center;
-    justify-content: center; color: var(--faint); gap: 10px; text-align: center;
-  }
-  .empty h2 { color: var(--fg); font-weight: 500; margin: 0; font-size: 20px; }
+  .empty { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--faint); gap: 8px; text-align: center; }
+  .empty h2 { color: var(--fg); font-weight: 500; margin: 0; font-size: 19px; }
   .empty p { margin: 0; font-size: 13px; }
 
-  .msg { margin: 16px 0; display: flex; gap: 12px; }
-  .msg .role {
-    font-family: var(--mono); font-size: 11px; color: var(--faint);
-    width: 58px; flex: 0 0 58px; padding-top: 3px; text-transform: uppercase;
+  /* ---------------- turn card ---------------- */
+  .turn {
+    border: 1px solid var(--border); border-radius: 12px; background: #fff;
+    margin: 14px 0; box-shadow: var(--shadow); overflow: hidden;
   }
-  .msg .body { flex: 1; min-width: 0; }
-  .msg.user .body .text { color: var(--fg); }
-  .msg .text { white-space: pre-wrap; word-break: break-word; }
+  .turn-head { padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--border-soft); }
+  .turn-label { font-family: var(--mono); font-size: 10px; color: var(--faint); letter-spacing: .8px; text-transform: uppercase; }
+  .turn-user { white-space: pre-wrap; word-break: break-word; margin-top: 3px; }
 
-  .card {
-    border: 1px solid var(--border); border-radius: 9px; background: #fff;
-    margin: 10px 0; overflow: hidden; box-shadow: var(--shadow);
-  }
-  .card-head {
-    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
-    font-family: var(--mono); font-size: 12px; color: var(--dim);
-    background: var(--panel); border-bottom: 1px solid var(--border-soft);
-  }
-  .card-head .name { color: var(--fg); }
-  .card-head .args { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .card-body { padding: 10px 12px; font-family: var(--mono); font-size: 12px; color: var(--dim); }
-  .card-body pre { margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
-  .card.collapsed .card-body { display: none; }
-  .toggle { margin-left: auto; color: var(--faint); font-size: 11px; user-select: none; }
-  .card-head { cursor: pointer; }
+  .turn-body { padding: 4px 16px; }
+  .step { padding: 9px 0; border-bottom: 1px dashed var(--border-soft); }
+  .step:last-child { border-bottom: none; }
+  .step-head { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12px; }
+  .step-name { color: var(--fg); font-weight: 500; }
+  .step-args { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+  .step-toggle { color: var(--faint); font-size: 11px; user-select: none; cursor: pointer; }
+  .step-result { margin-top: 6px; font-family: var(--mono); font-size: 12px; color: var(--dim); background: var(--panel); border: 1px solid var(--border-soft); border-radius: 7px; padding: 8px 10px; }
+  .step-result pre { margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow: auto; }
+  .step.collapsed .step-result { display: none; }
+  .pill { font-size: 10px; font-family: var(--mono); padding: 0 6px; border-radius: 4px; border: 1px solid var(--border); color: var(--faint); }
+  .pill.bad { border-color: #f3bdbe; color: var(--err); background: var(--err-soft); }
 
-  .kbadge {
-    display: inline-block; font-family: var(--mono); font-size: 10px;
-    padding: 1px 7px; border-radius: 4px; margin-bottom: 4px;
-    border: 1px solid transparent;
-  }
-  .kbadge.muted { color: var(--faint); border-color: var(--border); background: var(--panel); }
-  .kbadge.ok { color: var(--ok); border-color: #a7d3b3; background: #f0f9f2; }
-  .kbadge.warn { color: var(--warn); border-color: #f0d9a8; background: #fffaef; }
-  .text.streaming::after {
-    content: "▍"; color: var(--accent); margin-left: 1px;
-    animation: blink 1s steps(2, start) infinite;
-  }
+  .turn-foot { padding: 12px 16px; border-top: 1px solid var(--border-soft); }
+  .answer { white-space: pre-wrap; word-break: break-word; }
+  .answer.streaming::after { content: "▍"; color: var(--accent); margin-left: 1px; animation: blink 1s steps(2, start) infinite; }
   @keyframes blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+  .kbadge { display: inline-block; font-family: var(--mono); font-size: 10px; padding: 1px 7px; border-radius: 4px; margin-bottom: 5px; border: 1px solid transparent; }
+  .kbadge.muted { color: var(--faint); border-color: var(--border); background: var(--panel); }
+  .kbadge.ok { color: var(--ok); border-color: #a7d3b3; background: var(--ok-soft); }
+  .kbadge.warn { color: var(--warn); border-color: #f0d9a8; background: var(--warn-soft); }
+  .turn-meta { font-family: var(--mono); font-size: 10px; color: var(--faint); margin-top: 6px; }
+  .err { border-left: 2px solid var(--err); padding: 4px 10px; color: #a40e26; font-family: var(--mono); font-size: 12px; margin-top: 8px; }
 
-  .cp { display: flex; align-items: center; gap: 8px; color: var(--faint); font-family: var(--mono); font-size: 11px; margin: 10px 0; }
-  .cp::before { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
-  .cp::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
-
-  .err { border-left: 2px solid var(--err); padding: 6px 12px; color: #a40e26; font-family: var(--mono); font-size: 12px; }
-
-  .approval {
-    border: 1px solid #f0d9a8; background: #fffaef;
-    border-radius: 9px; padding: 12px; margin: 10px 0;
-  }
-  .approval .h { font-size: 12px; color: var(--warn); font-family: var(--mono); margin-bottom: 6px; }
-  .approval .b { display: flex; gap: 8px; margin-top: 10px; }
-  .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: #fff; color: var(--fg); }
+  .approval { border: 1px solid #f0d9a8; background: var(--warn-soft); border-radius: 9px; padding: 10px 12px; margin: 8px 0; }
+  .approval .h { font-size: 12px; color: var(--warn); font-family: var(--mono); }
+  .approval .b { display: flex; gap: 8px; margin-top: 8px; }
+  .btn { padding: 5px 13px; border-radius: 6px; border: 1px solid var(--border); background: #fff; color: var(--fg); }
   .btn:hover { background: var(--panel-2); }
   .btn.ok { border-color: #a7d3b3; color: var(--ok); }
   .btn.no { border-color: #f3bdbe; color: var(--err); }
 
-  .composer { flex: 0 0 auto; border-top: 1px solid var(--border); padding: 14px 0 18px; }
-  .composer .wrap { display: flex; flex-direction: column; gap: 8px; }
-  .input-wrap {
-    display: flex; align-items: flex-end; gap: 8px; background: #fff;
-    border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px;
-    box-shadow: var(--shadow);
-  }
+  /* ---------------- trajectory ---------------- */
+  .trail-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; color: var(--faint); font-family: var(--mono); font-size: 11px; }
+  .trail-turn { border: 1px solid var(--border); border-radius: 12px; background: #fff; margin: 12px 0; box-shadow: var(--shadow); overflow: hidden; }
+  .trail-top { display: grid; grid-template-columns: 44px 1fr 90px 90px; gap: 12px; align-items: center; padding: 12px 16px; cursor: pointer; }
+  .trail-top:hover { background: var(--panel); }
+  .trail-num { font-family: var(--mono); font-size: 12px; color: var(--faint); }
+  .trail-prompt { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .trail-dur, .trail-status { font-family: var(--mono); font-size: 11px; color: var(--dim); text-align: right; }
+  .trail-steps { border-top: 1px solid var(--border-soft); padding: 6px 16px 12px; }
+  .trail-row { display: grid; grid-template-columns: 150px 1fr 72px; gap: 10px; padding: 5px 0; font-family: var(--mono); font-size: 12px; border-bottom: 1px dashed var(--border-soft); }
+  .trail-row:last-child { border-bottom: none; }
+  .trail-row .ev { color: var(--dim); }
+  .trail-row .detail { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .trail-row .ms { text-align: right; color: var(--faint); }
+
+  /* ---------------- composer ---------------- */
+  .composer { flex: 0 0 auto; border-top: 1px solid var(--border); padding: 12px 0 16px; }
+  .composer .wrap { padding-top: 0; padding-bottom: 0; display: flex; flex-direction: column; gap: 8px; }
+  .input-wrap { display: flex; align-items: flex-end; gap: 8px; background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; box-shadow: var(--shadow); }
   .input-wrap:focus-within { border-color: #b6cdf7; box-shadow: 0 0 0 3px var(--accent-soft); }
-  textarea {
-    flex: 1; resize: none; border: none; outline: none; background: transparent;
-    color: var(--fg); font-family: var(--sans); font-size: 14px; line-height: 1.55;
-    max-height: 180px; min-height: 24px; padding: 3px 0;
-  }
-  .send {
-    border: none; background: var(--accent); color: #fff; border-radius: 7px;
-    padding: 7px 14px; font-weight: 500;
-  }
+  textarea { flex: 1; resize: none; border: none; outline: none; background: transparent; color: var(--fg); font-family: var(--sans); font-size: 14px; line-height: 1.55; max-height: 180px; min-height: 24px; padding: 3px 0; }
+  textarea:disabled { color: var(--faint); }
+  .send { border: none; background: var(--accent); color: #fff; border-radius: 7px; padding: 7px 15px; font-weight: 500; }
   .send:disabled { opacity: .45; cursor: not-allowed; }
-  .stop {
-    border: 1px solid var(--border); background: #fff; color: var(--err);
-    border-radius: 7px; padding: 7px 12px; font-weight: 500;
-  }
-  .stop:hover:not(:disabled) { background: #fff5f5; border-color: #f3bdbe; }
+  .stop { border: 1px solid var(--border); background: #fff; color: var(--err); border-radius: 7px; padding: 7px 12px; }
+  .stop:hover:not(:disabled) { background: var(--err-soft); border-color: #f3bdbe; }
   .stop:disabled { opacity: .45; cursor: not-allowed; color: var(--faint); }
   .hint { font-size: 11px; color: var(--faint); font-family: var(--mono); }
-
-  /* ---- modal ---- */
-  .overlay {
-    position: fixed; inset: 0; background: rgba(27, 31, 36, .32);
-    display: none; align-items: center; justify-content: center; z-index: 50;
-  }
-  .overlay.show { display: flex; }
-  .modal {
-    width: 660px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px);
-    background: #fff; border: 1px solid var(--border); border-radius: 12px;
-    display: flex; flex-direction: column; overflow: hidden;
-    box-shadow: 0 12px 40px rgba(27, 31, 36, .18);
-  }
-  .modal h3 { margin: 0; padding: 16px 18px 12px; font-size: 15px; font-weight: 500; }
-  .modal .path-row { display: flex; gap: 8px; padding: 0 18px 12px; }
-  .modal .path-row input {
-    flex: 1; background: #fff; border: 1px solid var(--border); border-radius: 7px;
-    color: var(--fg); padding: 7px 10px; font-family: var(--mono); font-size: 12px; outline: none;
-  }
-  .modal .path-row input:focus { border-color: #b6cdf7; box-shadow: 0 0 0 3px var(--accent-soft); }
-  .browser { flex: 1; overflow-y: auto; border-top: 1px solid var(--border-soft); min-height: 200px; }
-  .entry {
-    display: flex; align-items: center; gap: 8px; padding: 6px 18px;
-    font-family: var(--mono); font-size: 12px; color: var(--dim); cursor: pointer;
-  }
-  .entry:hover { background: var(--panel-2); color: var(--fg); }
-  .entry .repo { color: var(--ok); font-size: 10px; }
-  .modal .foot { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 18px; border-top: 1px solid var(--border-soft); }
-  .modal .err-line { color: var(--err); font-family: var(--mono); font-size: 12px; padding: 0 18px 8px; min-height: 18px; }
 </style>
 </head>
 <body>
 <div class="app">
   <aside class="side">
-    <div class="brand">
-      <span class="dot"></span><span>hepilot</span>
-      <span class="brand-sub" id="modelChip">local coding agent</span>
-    </div>
+    <div class="brand"><span class="dot"></span><span>hepilot</span><span class="brand-sub" id="modelChip">local</span></div>
     <button class="new-btn" id="newBtn">＋ 新建会话</button>
+    <div class="search-box"><input id="filter" placeholder="过滤会话…" /></div>
     <div class="sessions" id="sessions"></div>
   </aside>
 
   <main class="main">
     <div class="topbar">
+      <div class="tabs">
+        <button class="tab active" id="tabChat">对话</button>
+        <button class="tab" id="tabTrail">轨迹</button>
+      </div>
       <span class="title" id="sessionTitle">未选择会话</span>
       <span class="chip" id="workspaceChip">—</span>
       <span class="spacer"></span>
       <span class="chip" id="statusChip">idle</span>
     </div>
-    <div class="stream" id="stream">
-      <div class="wrap">
-        <div class="empty">
-          <h2>开始一次会话</h2>
-          <p>点左上角「新建会话」，选一个代码仓库作为工作区。</p>
-        </div>
+
+    <div class="pane" id="pane">
+      <div class="wrap" id="wrap">
+        <div class="empty"><h2>开始一次会话</h2><p>点左上角「新建会话」，会弹出系统文件夹选择框。</p></div>
       </div>
     </div>
-    <div class="composer">
+
+    <div class="composer" id="composer">
       <div class="wrap">
         <div class="input-wrap">
           <textarea id="input" rows="1" placeholder="描述你想做的事，Enter 发送，Shift+Enter 换行"></textarea>
@@ -253,26 +223,20 @@
   </main>
 </div>
 
-<div class="overlay" id="overlay">
-  <div class="modal">
-    <h3>选择工作区</h3>
-    <div class="path-row">
-      <input id="pathInput" placeholder="输入目录路径，或用下面的浏览器选择" />
-      <button class="btn" id="upBtn">上一级</button>
-    </div>
-    <div class="browser" id="browser"></div>
-    <div class="err-line" id="modalErr"></div>
-    <div class="foot">
-      <button class="btn" id="cancelBtn">取消</button>
-      <button class="btn ok" id="confirmBtn">用这个目录新建</button>
-    </div>
-  </div>
-</div>
-
 <script>
 const $ = (id) => document.getElementById(id);
-const state = { sessions: [], current: null, lastSeq: 0, es: null, busy: false, live: null };
 const STATUS_LABEL = { idle: "空闲", running: "运行中", interrupted: "已中断" };
+const state = {
+  sessions: [], current: null, view: "chat",
+  lastSeq: 0, es: null, busy: false,
+  items: [],          // 原始 transcript 条目
+  turns: [],          // 由 items 折叠出的轮次
+  collapsed: new Set(),
+  filter: "",
+  renaming: null,
+};
+
+/* ------------------------------ utils ------------------------------ */
 
 function fmtTime(iso) {
   if (!iso) return "";
@@ -280,15 +244,31 @@ function fmtTime(iso) {
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
-
+function fmtDur(ms) {
+  if (ms === null || ms === undefined) return "";
+  return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : Math.round(ms) + "ms";
+}
+function escapeHtml(text) {
+  return String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function compactArgs(args) {
+  if (!args || !Object.keys(args).length) return "";
+  const text = JSON.stringify(args);
+  return text.length > 110 ? text.slice(0, 110) + "…" : text;
+}
+function truncate(text, limit) {
+  const s = String(text ?? "");
+  return s.length > limit ? s.slice(0, limit) + `\n… (${s.length - limit} more chars)` : s;
+}
 async function api(path, options) {
   const res = await fetch(path, options);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
 }
+function sessionLabel(s) { return (s.name && s.name.trim()) || s.id; }
 
-/* ---------------- sessions ---------------- */
+/* ------------------------------ sidebar ------------------------------ */
 
 async function loadSessions() {
   const data = await api("/api/sessions");
@@ -299,57 +279,297 @@ async function loadSessions() {
 function renderSessions() {
   const root = $("sessions");
   root.innerHTML = "";
-  if (!state.sessions.length) {
-    root.innerHTML = '<div class="group-label">还没有会话</div>';
+  const filter = state.filter.trim().toLowerCase();
+  const visible = state.sessions.filter((s) => {
+    if (!filter) return true;
+    return (s.workspace_root + " " + sessionLabel(s) + " " + s.id).toLowerCase().includes(filter);
+  });
+  if (!visible.length) {
+    root.innerHTML = '<div class="group-head" style="cursor:default">没有匹配的会话</div>';
     return;
   }
-  let lastWorkspace = null;
-  for (const s of state.sessions) {
-    if (s.workspace_root !== lastWorkspace) {
-      lastWorkspace = s.workspace_root;
-      const label = document.createElement("div");
-      label.className = "group-label";
-      label.textContent = s.workspace_root;
-      label.title = s.workspace_root;
-      root.appendChild(label);
-    }
-    const el = document.createElement("div");
-    el.className = "session" + (s.id === state.current ? " active" : "");
-    el.innerHTML =
-      `<div class="t">${escapeHtml(s.title || s.id)}</div>` +
-      `<div class="m">${fmtTime(s.updated_at)} · ${s.event_count} 事件` +
-      (s.status === "running" ? ' <span class="badge running">运行中</span>' : "") +
-      (s.status === "interrupted" ? ' <span class="badge interrupted">已中断</span>' : "") +
-      `</div>`;
-    el.onclick = () => openSession(s.id);
-    root.appendChild(el);
+  // 按工作区分组；同一项目的会话聚在一起
+  const groups = new Map();
+  for (const s of visible) {
+    if (!groups.has(s.workspace_root)) groups.set(s.workspace_root, []);
+    groups.get(s.workspace_root).push(s);
+  }
+  for (const [workspace, list] of groups) {
+    const collapsed = state.collapsed.has(workspace);
+    const head = document.createElement("div");
+    head.className = "group-head";
+    head.innerHTML = `<span class="caret">${collapsed ? "▸" : "▾"}</span>` +
+      `<span class="gpath" title="${escapeHtml(workspace)}">${escapeHtml(shortPath(workspace))}</span>` +
+      `<span class="count">${list.length}</span>`;
+    head.onclick = () => {
+      if (collapsed) state.collapsed.delete(workspace); else state.collapsed.add(workspace);
+      renderSessions();
+    };
+    root.appendChild(head);
+    if (collapsed) continue;
+    for (const s of list) root.appendChild(sessionRow(s));
   }
 }
 
-/* ---------------- session view ---------------- */
+function shortPath(path) {
+  return String(path).replace(/^[A-Za-z]:[\\/]/, "").replace(/\\/g, "/");
+}
+
+function sessionRow(s) {
+  const el = document.createElement("div");
+  el.className = "session" + (s.id === state.current ? " active" : "");
+  const badge = s.status === "running" ? ' <span class="badge running">运行中</span>'
+    : s.status === "interrupted" ? ' <span class="badge interrupted">已中断</span>' : "";
+
+  if (state.renaming === s.id) {
+    const input = document.createElement("input");
+    input.className = "rename";
+    input.value = s.name || "";
+    input.placeholder = s.id;
+    const commit = async (save) => {
+      const value = input.value.trim();
+      state.renaming = null;
+      if (save) {
+        try {
+          await api(`/api/sessions/${s.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: value }),
+          });
+          s.name = value;
+        } catch (err) { console.error(err); }
+      }
+      renderSessions();
+      if (state.current === s.id) $("sessionTitle").textContent = sessionLabel(s);
+    };
+    input.onkeydown = (e) => {
+      if (e.key === "Enter") commit(true);
+      if (e.key === "Escape") commit(false);
+    };
+    input.onblur = () => commit(true);
+    el.appendChild(input);
+    setTimeout(() => input.focus(), 0);
+  } else {
+    el.innerHTML =
+      `<div class="row1"><span class="t">${escapeHtml(sessionLabel(s))}</span>${badge}</div>` +
+      `<div class="m">${fmtTime(s.updated_at) || "—"} · ${s.event_count} 事件</div>`;
+    el.onclick = () => openSession(s.id);
+    el.ondblclick = (e) => { e.preventDefault(); state.renaming = s.id; renderSessions(); };
+    el.title = s.id;
+  }
+  return el;
+}
+
+/* ------------------------------ turns ------------------------------ */
+
+function buildTurns(items) {
+  const turns = [];
+  let cur = null;
+  const ensure = () => {
+    if (!cur) { cur = { user: "", steps: [], answer: "", answerKind: "", error: "", end: null, approvals: [], live: "", liveKind: "" }; turns.push(cur); }
+    return cur;
+  };
+  for (const it of items) {
+    if (it.kind === "user") {
+      cur = { user: it.text || "", steps: [], answer: "", answerKind: "", error: "", end: null, approvals: [], live: "", liveKind: "" };
+      turns.push(cur);
+      continue;
+    }
+    const turn = ensure();
+    switch (it.kind) {
+      case "assistant":
+        if (it.msgKind === "tool" || (it.toolUses && it.toolUses.length)) {
+          // 工具调用本身不单独渲染：随后的 tool 结果里带着 name/args，避免重复
+          break;
+        }
+        turn.answer = it.text || "";
+        turn.answerKind = it.msgKind || "final";
+        turn.live = "";
+        break;
+      case "tool":
+        turn.steps.push(it);
+        break;
+      case "delta":
+        turn.live += it.text || "";
+        turn.liveKind = it.streamKind || "text";
+        break;
+      case "assistant_start":
+        turn.live = ""; turn.liveKind = "text";
+        break;
+      case "approval":
+        turn.approvals.push(it);
+        break;
+      case "error":
+        turn.error = it.message || "";
+        break;
+      case "run_end":
+        turn.end = { status: it.status, stop: it.stopReason };
+        turn.live = "";
+        break;
+      default:
+        // checkpoint / approval_resolved 等不展示
+        break;
+    }
+  }
+  return turns;
+}
+
+/* ------------------------------ chat render ------------------------------ */
+
+const KBADGE = { text: ["推理中", "muted"], tool: ["准备调用工具", "warn"], final: ["回答", "ok"], retry: ["格式重试", "warn"] };
+
+function renderChat() {
+  const wrap = $("wrap");
+  if (!state.turns.length) {
+    wrap.innerHTML = '<div class="empty"><h2>开始一次会话</h2><p>点左上角「新建会话」，会弹出系统文件夹选择框。</p></div>';
+    return;
+  }
+  wrap.innerHTML = state.turns.map(turnHtml).join("");
+  bindStepToggles(wrap);
+}
+
+function turnHtml(turn) {
+  const parts = [];
+  parts.push('<div class="turn">');
+  if (turn.user) {
+    parts.push(`<div class="turn-head"><div class="turn-label">you</div><div class="turn-user">${escapeHtml(turn.user)}</div></div>`);
+  }
+  const body = [];
+  for (const step of turn.steps) {
+    const bad = step.synthetic || /^error/i.test(step.result || "");
+    body.push('<div class="step collapsed">');
+    body.push(`<div class="step-head">`);
+    body.push(`<span class="step-name">${escapeHtml(step.name || "tool")}</span>`);
+    body.push(`<span class="step-args">${escapeHtml(compactArgs(step.args))}</span>`);
+    if (step.synthetic) body.push('<span class="pill bad">未执行</span>');
+    body.push(`<span class="step-toggle">展开</span></div>`);
+    body.push(`<div class="step-result"><pre>${escapeHtml(truncate(step.result || "", 3000))}</pre></div>`);
+    body.push("</div>");
+  }
+  for (const ap of turn.approvals) {
+    body.push(`<div class="approval"><div class="h">需要审批 · ${escapeHtml(ap.name)}</div>` +
+      `<div class="step-result"><pre>${escapeHtml(compactArgs(ap.args))}</pre></div>` +
+      `<div class="b"><button class="btn ok" data-approve="1">允许</button><button class="btn no" data-deny="1">拒绝</button></div></div>`);
+  }
+  if (body.length) parts.push(`<div class="turn-body">${body.join("")}</div>`);
+
+  const foot = [];
+  if (turn.live) {
+    const [label, cls] = KBADGE[turn.liveKind] || KBADGE.text;
+    foot.push(`<div><span class="kbadge ${cls}">${label}</span></div>`);
+    foot.push(`<div class="answer streaming">${escapeHtml(turn.live)}</div>`);
+  } else if (turn.answer) {
+    const [label, cls] = KBADGE[turn.answerKind] || KBADGE.ok;
+    foot.push(`<div><span class="kbadge ${cls}">${label}</span></div>`);
+    foot.push(`<div class="answer">${escapeHtml(turn.answer)}</div>`);
+  }
+  if (turn.error) foot.push(`<div class="err">${escapeHtml(turn.error)}</div>`);
+  if (turn.end) {
+    const label = turn.end.status === "completed" ? "本轮完成" : `本轮结束 · ${turn.end.stop || turn.end.status}`;
+    foot.push(`<div class="turn-meta">${escapeHtml(label)}</div>`);
+  }
+  if (foot.length) parts.push(`<div class="turn-foot">${foot.join("")}</div>`);
+  parts.push("</div>");
+  return parts.join("");
+}
+
+function bindStepToggles(root) {
+  root.querySelectorAll(".step-head").forEach((head) => {
+    head.onclick = () => {
+      const step = head.parentElement;
+      step.classList.toggle("collapsed");
+      head.querySelector(".step-toggle").textContent = step.classList.contains("collapsed") ? "展开" : "收起";
+    };
+  });
+}
+
+function scrollBottom() { const pane = $("pane"); pane.scrollTop = pane.scrollHeight; }
+
+/* ------------------------------ trajectory ------------------------------ */
+
+async function renderTrail() {
+  if (!state.current) return;
+  const pane = $("pane");
+  pane.innerHTML = '<div class="wrap"><div class="empty"><p>加载轨迹…</p></div></div>';
+  try {
+    const data = await api(`/api/sessions/${state.current}/trajectory`);
+    const turns = data.turns || [];
+    if (!turns.length) {
+      pane.innerHTML = '<div class="wrap"><div class="empty"><h2>还没有轨迹</h2><p>发一条消息后这里会出现每一轮的执行时间线。</p></div></div>';
+      return;
+    }
+    const html = turns.map((turn, index) => {
+      const steps = (turn.steps || []).map((step) => {
+        const detail = step.name
+          ? `${escapeHtml(step.tool || "")} ${escapeHtml(compactArgs(step.args))}`
+          : escapeHtml(step.stopReason || step.trigger || "");
+        return `<div class="trail-row"><span class="ev">${escapeHtml(step.event)}</span>` +
+          `<span class="detail">${detail}</span>` +
+          `<span class="ms">${fmtDur(step.durationMs)}</span></div>`;
+      }).join("");
+      return `<div class="trail-turn">` +
+        `<div class="trail-top" data-idx="${index}">` +
+        `<span class="trail-num">#${turn.index}</span>` +
+        `<span class="trail-prompt" title="${escapeHtml(turn.prompt)}">${escapeHtml(turn.prompt || "(空)")}</span>` +
+        `<span class="trail-dur">${fmtDur(turn.durationMs)}</span>` +
+        `<span class="trail-status">${escapeHtml(turn.status || "—")}</span>` +
+        `</div>` +
+        `<div class="trail-steps" style="display:none">${steps || '<div class="trail-row"><span class="detail">(无步骤)</span></div>'}</div>` +
+        `</div>`;
+    }).join("");
+    const meta = `<div class="trail-head"><span>${turns.length} 轮</span><span>·</span><span>${data.eventCount} 个事件</span>` +
+      `<span>·</span><span>${escapeHtml(data.session.workspace_root)}</span></div>`;
+    pane.innerHTML = `<div class="wrap">${meta}${html}</div>`;
+    pane.querySelectorAll(".trail-top").forEach((row) => {
+      row.onclick = () => {
+        const steps = row.nextElementSibling;
+        steps.style.display = steps.style.display === "none" ? "block" : "none";
+      };
+    });
+  } catch (err) {
+    pane.innerHTML = `<div class="wrap"><div class="err">${escapeHtml(err.message)}</div></div>`;
+  }
+}
+
+function setView(view) {
+  state.view = view;
+  $("tabChat").classList.toggle("active", view === "chat");
+  $("tabTrail").classList.toggle("active", view === "trail");
+  $("composer").style.display = view === "chat" ? "" : "none";
+  if (view === "chat") {
+    $("pane").innerHTML = '<div class="wrap" id="wrap"></div>';
+    renderChat();
+    scrollBottom();
+  } else {
+    renderTrail();
+  }
+}
+
+/* ------------------------------ session ------------------------------ */
 
 async function openSession(id) {
   state.current = id;
   state.lastSeq = 0;
+  state.items = [];
+  state.turns = [];
   closeStream();
   const data = await api(`/api/sessions/${id}`);
   state.lastSeq = data.lastSeq || 0;
-  $("sessionTitle").textContent = data.session.title || id;
-  $("workspaceChip").textContent = data.session.workspace_root;
-  $("workspaceChip").title = data.session.workspace_root;
-  $("statusChip").textContent = STATUS_LABEL[data.session.status] || data.session.status || "idle";
+  state.items = (data.transcript || []).slice();
+  state.turns = buildTurns(state.items);
+  const s = data.session;
+  $("sessionTitle").textContent = sessionLabel(s);
+  $("workspaceChip").textContent = s.workspace_root;
+  $("workspaceChip").title = s.workspace_root;
+  $("statusChip").textContent = STATUS_LABEL[s.status] || s.status || "idle";
   $("send").disabled = false;
   $("input").disabled = false;
-  $("hint").textContent = data.session.status === "interrupted"
+  $("hint").textContent = s.status === "interrupted"
     ? "上次运行被中断（服务重启/崩溃）。可以直接继续发消息。"
-    : "Enter 发送 · Shift+Enter 换行";
-  const stream = $("stream");
-  stream.innerHTML = '<div class="wrap" id="wrap"></div>';
-  state.live = null;
-  for (const item of data.transcript || []) renderItem(item, false);
-  scrollBottom();
-  openStream(id, state.lastSeq);
+    : "Enter 发送 · Shift+Enter 换行 · 双击左侧会话可重命名";
   renderSessions();
+  setView(state.view);
+  openStream(id, state.lastSeq);
 }
 
 function openStream(id, after) {
@@ -360,21 +580,27 @@ function openStream(id, after) {
     try { event = JSON.parse(ev.data); } catch { return; }
     if (event.seq <= state.lastSeq) return;
     state.lastSeq = event.seq;
-    renderItem(transcriptItem(event), true);
+    const item = transcriptItem(event);
+    if (item) {
+      state.items.push(item);
+      state.turns = buildTurns(state.items);
+      if (state.view === "chat") {
+        renderChat();
+        scrollBottom();
+      }
+    }
     if (event.type === "run_finished" || event.type === "run_failed") {
       state.busy = false;
-      $("statusChip").textContent = "idle";
+      $("statusChip").textContent = STATUS_LABEL.idle;
       $("send").disabled = false;
       $("stop").disabled = true;
       loadSessions();
+      if (state.view === "trail") renderTrail();
     }
   };
-  es.onerror = () => { /* 浏览器会自动重连 */ };
 }
 
-function closeStream() {
-  if (state.es) { state.es.close(); state.es = null; }
-}
+function closeStream() { if (state.es) { state.es.close(); state.es = null; } }
 
 function transcriptItem(event) {
   const d = event.data || {};
@@ -384,179 +610,25 @@ function transcriptItem(event) {
     case "assistant_start": return { kind: "assistant_start" };
     case "assistant_delta": return { kind: "delta", text: d.text || "", streamKind: d.kind || "text" };
     case "tool_executed": return { kind: "tool", name: d.name, args: d.args, result: d.result, synthetic: d.synthetic };
-    case "run_started": return { kind: "run_start" };
-    case "run_finished": return { kind: "run_end", status: d.status, stopReason: d.stop_reason, final: d.final_answer };
-    case "checkpoint_created": return { kind: "checkpoint", trigger: d.trigger };
+    case "run_finished": return { kind: "run_end", status: d.status, stopReason: d.stop_reason };
     case "model_failed": return { kind: "error", message: d.error_message };
     case "approval_requested": return { kind: "approval", approvalId: d.approval_id, name: d.name, args: d.args };
-    case "approval_resolved": return { kind: "approval_resolved", approvalId: d.approval_id, approved: d.approved, reason: d.reason };
+    case "approval_resolved":
+    case "checkpoint_created":
     default: return null;
   }
 }
 
-/* ---------------- rendering ---------------- */
-
-function escapeHtml(text) {
-  return String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-function createAssistantBubble() {
-  const wrap = $("wrap");
-  const el = document.createElement("div");
-  el.className = "msg assistant";
-  el.innerHTML =
-    '<div class="role">hepilot</div><div class="body">' +
-    '<div><span class="kbadge muted" data-badge>…</span></div>' +
-    '<div class="text" data-text></div>' +
-    '<div data-calls></div></div>';
-  if (wrap) wrap.appendChild(el);
-  const textEl = el.querySelector("[data-text]");
-  const badgeEl = el.querySelector("[data-badge]");
-  const callsEl = el.querySelector("[data-calls]");
-  const LABELS = {
-    text: ["推理中", "muted"],
-    tool: ["准备调用工具", "warn"],
-    final: ["回答", "ok"],
-    retry: ["格式重试", "warn"],
-    stopped: ["已停止", "muted"],
-  };
-  return {
-    el,
-    text: "",
-    calls: [],
-    paint(kind) {
-      const [label, cls] = LABELS[kind] || LABELS.text;
-      badgeEl.className = "kbadge " + cls;
-      badgeEl.textContent = label;
-      textEl.textContent = this.text;
-      textEl.classList.toggle("streaming", kind === "text");
-    },
-    paintCalls() {
-      callsEl.innerHTML = "";
-      for (const t of this.calls || []) {
-        const card = document.createElement("div");
-        card.className = "card";
-        card.innerHTML = `<div class="card-body"><pre>→ ${escapeHtml(t.name)} ${escapeHtml(compactArgs(t.args))}</pre></div>`;
-        callsEl.appendChild(card);
-      }
-    },
-  };
-}
-
-function renderItem(item, live) {
-  const wrap = $("wrap");
-  if (!wrap || !item) return;
-  const el = document.createElement("div");
-
-  /* ---- 流式：开始 / 增量 / 收口 ---- */
-  if (item.kind === "assistant_start") {
-    state.live = createAssistantBubble();
-    return;
-  }
-  if (item.kind === "delta") {
-    if (!state.live) state.live = createAssistantBubble();
-    state.live.text += item.text || "";
-    state.live.paint(item.streamKind);
-    if (live) scrollBottom();
-    return;
-  }
-
-  if (item.kind === "user" || item.kind === "assistant") {
-    if (item.kind === "assistant") {
-      // 有流式气泡就收口到它上面，避免出现两条重复的回复。
-      const bubble = state.live || createAssistantBubble();
-      bubble.text = item.text || "";
-      bubble.paint(item.msgKind || (item.toolUses && item.toolUses.length ? "tool" : "final"));
-      bubble.calls = item.toolUses || [];
-      bubble.paintCalls();
-      state.live = null;
-      if (live) scrollBottom();
-      return;
-    }
-    el.className = "msg user";
-    el.innerHTML = `<div class="role">user</div><div class="body"><div class="text">${escapeHtml(item.text || "")}</div></div>`;
-    if (!String(item.text || "").trim()) return;
-  } else if (item.kind === "tool") {
-    el.className = "card collapsed";
-    el.innerHTML =
-      `<div class="card-head"><span class="name">${escapeHtml(item.name)}</span>` +
-      `<span class="args">${escapeHtml(compactArgs(item.args))}</span>` +
-      `<span class="toggle">展开</span></div>` +
-      `<div class="card-body"><pre>${escapeHtml(truncate(item.result, 4000))}</pre></div>`;
-    const head = el.querySelector(".card-head");
-    head.onclick = () => {
-      el.classList.toggle("collapsed");
-      head.querySelector(".toggle").textContent = el.classList.contains("collapsed") ? "展开" : "收起";
-    };
-  } else if (item.kind === "run_end") {
-    el.className = "cp";
-    el.textContent = item.status === "completed" ? "本轮完成" : `本轮结束 · ${item.stopReason || item.status}`;
-  } else if (item.kind === "run_start") {
-    return;
-  } else if (item.kind === "checkpoint") {
-    el.className = "cp";
-    el.textContent = `checkpoint · ${item.trigger}`;
-  } else if (item.kind === "error") {
-    el.className = "err";
-    el.textContent = item.message || "unknown error";
-  } else if (item.kind === "approval") {
-    el.className = "approval";
-    el.innerHTML =
-      `<div class="h">需要审批 · ${escapeHtml(item.name)}</div>` +
-      `<div class="card-body" style="padding:0"><pre>${escapeHtml(compactArgs(item.args))}</pre></div>` +
-      `<div class="b"><button class="btn ok" data-ok="1">允许</button><button class="btn no" data-no="1">拒绝</button></div>`;
-    el.querySelector("[data-ok]").onclick = () => resolveApproval(item.approvalId, true, el);
-    el.querySelector("[data-no]").onclick = () => resolveApproval(item.approvalId, false, el);
-  } else if (item.kind === "approval_resolved") {
-    el.className = "cp";
-    el.textContent = item.approved ? "已允许" : `已拒绝${item.reason ? " · " + item.reason : ""}`;
-  } else {
-    return;
-  }
-
-  wrap.appendChild(el);
-  if (live) scrollBottom();
-}
-
-function compactArgs(args) {
-  if (!args || !Object.keys(args).length) return "";
-  const text = JSON.stringify(args);
-  return text.length > 120 ? text.slice(0, 120) + "…" : text;
-}
-
-function truncate(text, limit) {
-  const s = String(text ?? "");
-  return s.length > limit ? s.slice(0, limit) + `\n… (${s.length - limit} more chars)` : s;
-}
-
-function scrollBottom() {
-  const stream = $("stream");
-  stream.scrollTop = stream.scrollHeight;
-}
-
-async function resolveApproval(approvalId, approved, el) {
-  el.querySelectorAll("button").forEach((b) => (b.disabled = true));
-  try {
-    await api(`/api/sessions/${state.current}/approvals/${approvalId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ approved }),
-    });
-  } catch (err) {
-    el.querySelector(".h").textContent = "审批失败：" + err.message;
-  }
-}
-
-/* ---------------- composer ---------------- */
+/* ------------------------------ actions ------------------------------ */
 
 async function send() {
   const input = $("input");
   const text = input.value.trim();
   if (!text || !state.current || state.busy) return;
-    state.busy = true;
+  state.busy = true;
   $("send").disabled = true;
   $("stop").disabled = false;
-  $("statusChip").textContent = "运行中";
+  $("statusChip").textContent = STATUS_LABEL.running;
   input.value = "";
   autosize();
   try {
@@ -568,8 +640,53 @@ async function send() {
   } catch (err) {
     state.busy = false;
     $("send").disabled = false;
-    $("statusChip").textContent = "idle";
-    renderItem({ kind: "error", message: err.message }, true);
+    $("stop").disabled = true;
+    $("statusChip").textContent = STATUS_LABEL.idle;
+    state.items.push({ kind: "error", message: err.message });
+    state.turns = buildTurns(state.items);
+    if (state.view === "chat") renderChat();
+  }
+}
+
+async function stop() {
+  if (!state.current || !state.busy) return;
+  $("stop").disabled = true;
+  $("statusChip").textContent = "正在停止…";
+  try { await api(`/api/sessions/${state.current}/cancel`, { method: "POST" }); }
+  catch (err) { console.error(err); }
+}
+
+async function newSession() {
+  const btn = $("newBtn");
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "选择文件夹…";
+  try {
+    const picked = await api("/api/pick-folder", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    btn.textContent = "创建中…";
+    const data = await api("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_root: picked.path }),
+    });
+    await loadSessions();
+    await openSession(data.session.id);
+  } catch (err) {
+    // 系统对话框不可用时退回手输路径
+    const manual = window.prompt("无法弹出系统文件夹选择框（" + err.message + "）\n请手动输入工作区路径：", "");
+    if (!manual) return;
+    try {
+      const data = await api("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspace_root: manual }),
+      });
+      await loadSessions();
+      await openSession(data.session.id);
+    } catch (err2) { window.alert("创建失败：" + err2.message); }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
   }
 }
 
@@ -579,84 +696,33 @@ function autosize() {
   input.style.height = Math.min(input.scrollHeight, 180) + "px";
 }
 
-async function stop() {
-  if (!state.current || !state.busy) return;
-  $("stop").disabled = true;
-  $("statusChip").textContent = "正在停止…";
-  try {
-    await api(`/api/sessions/${state.current}/cancel`, { method: "POST" });
-  } catch (err) {
-    renderItem({ kind: "error", message: err.message }, true);
-  }
-}
+/* ------------------------------ wiring ------------------------------ */
 
-/* ---------------- new session modal ---------------- */
-
-let browsePath = "";
-
-async function openModal() {
-  $("overlay").classList.add("show");
-  $("modalErr").textContent = "";
-  await browse("");
-}
-
-async function browse(path) {
-  try {
-    const data = await api(`/api/fs?path=${encodeURIComponent(path)}`);
-    browsePath = data.path;
-    $("pathInput").value = data.path;
-    const list = $("browser");
-    list.innerHTML = "";
-    for (const entry of data.entries) {
-      if (!entry.isDir) continue;
-      const row = document.createElement("div");
-      row.className = "entry";
-      row.innerHTML = `📁 ${escapeHtml(entry.name)}` + (entry.isRepo ? ' <span class="repo">● repo</span>' : "");
-      row.onclick = () => browse(entry.path);
-      list.appendChild(row);
-    }
-    if (!list.children.length) list.innerHTML = '<div class="entry" style="cursor:default">（没有子目录）</div>';
-    $("modalErr").textContent = data.isRepo ? "" : "提示：这个目录不是 git 仓库，也能用，但快照会少一部分信息。";
-  } catch (err) {
-    $("modalErr").textContent = err.message;
-  }
-}
-
-async function createSession() {
-  $("confirmBtn").disabled = true;
-  try {
-    const data = await api("/api/sessions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspace_root: $("pathInput").value || browsePath }),
-    });
-    $("overlay").classList.remove("show");
-    await loadSessions();
-    await openSession(data.session.id);
-  } catch (err) {
-    $("modalErr").textContent = err.message;
-  } finally {
-    $("confirmBtn").disabled = false;
-  }
-}
-
-/* ---------------- wiring ---------------- */
-
-$("newBtn").onclick = openModal;
-$("cancelBtn").onclick = () => $("overlay").classList.remove("show");
-$("confirmBtn").onclick = createSession;
-$("upBtn").onclick = () => { if (browsePath) browse(browsePath.replace(/[\\/][^\\/]+$/, "") || browsePath); };
-$("pathInput").onkeydown = (e) => { if (e.key === "Enter") browse($("pathInput").value); };
-$("overlay").onclick = (e) => { if (e.target === $("overlay")) $("overlay").classList.remove("show"); };
-
+$("newBtn").onclick = newSession;
+$("tabChat").onclick = () => setView("chat");
+$("tabTrail").onclick = () => setView("trail");
 $("send").onclick = send;
 $("stop").onclick = stop;
 $("input").oninput = autosize;
-$("input").onkeydown = (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-};
+$("input").onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } };
+$("filter").oninput = (e) => { state.filter = e.target.value; renderSessions(); };
+document.addEventListener("click", (e) => {
+  const approve = e.target.closest("[data-approve]");
+  const deny = e.target.closest("[data-deny]");
+  if (!approve && !deny) return;
+  const box = e.target.closest(".approval");
+  const turn = state.turns[state.turns.length - 1];
+  const ap = turn && turn.approvals[turn.approvals.length - 1];
+  if (!ap) return;
+  box.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  api(`/api/sessions/${state.current}/approvals/${ap.approvalId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approved: !!approve }),
+  }).catch((err) => { console.error(err); });
+});
 
-loadSessions().catch((err) => renderItem({ kind: "error", message: err.message }, true));
+loadSessions().catch((err) => console.error(err));
 </script>
 </body>
 </html>

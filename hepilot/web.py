@@ -12,6 +12,7 @@
 import json
 import mimetypes
 import os
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -265,7 +266,7 @@ class SessionManager:
 
     # ---- 创建与获取 ----
 
-    def create(self, workspace_root, title=""):
+    def create(self, workspace_root, title="", name=""):
         root = Path(str(workspace_root)).expanduser().resolve()
         if not root.exists() or not root.is_dir():
             raise ValueError(f"workspace does not exist or is not a directory: {root}")
@@ -278,6 +279,7 @@ class SessionManager:
         session_id = time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(3).hex()
         session = {
             "id": session_id,
+            "name": str(name or "").strip(),
             "title": str(title or "").strip() or f"会话 {session_id[:15]}",
             "created_at": utc_now(),
             "workspace_root": str(root),
@@ -289,6 +291,7 @@ class SessionManager:
         agent.session_store.create(
             {
                 "id": session_id,
+                "name": session["name"],
                 "title": session["title"],
                 "workspace_root": str(root),
                 "created_at": session["created_at"],
@@ -379,6 +382,98 @@ class SessionManager:
 # --------------------------------------------------------------------- 路由
 
 
+def _read_trace(store, session_id, run_id):
+    """读某次 run 的 trace.jsonl；缺失就返回空列表。"""
+    if not run_id:
+        return []
+    path = store.runs_dir(session_id) / str(run_id) / "trace.jsonl"
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
+def build_trajectory(store, session_id):
+    """把会话折叠成「每轮一条」的轨迹，供轨迹页展示。
+
+    思路和 DSH 的 turnOutline 一样：以用户消息为一轮的边界，
+    每轮挂上它的时间线。差别是我们把 run trace 里的细节也带上
+    （模型耗时、工具耗时、状态），因为这里同时当调试视图用。
+    """
+    header = store.read_header(session_id)
+    if header is None:
+        raise KeyError(f"session not found: {session_id}")
+    events = store.read_events(session_id)
+
+    turns = []
+    current = None
+    for event in events:
+        kind = event.get("type")
+        data = event.get("data") or {}
+        if kind == "user_message":
+            if current is not None:
+                turns.append(current)
+            current = {
+                "index": len(turns) + 1,
+                "seq": event.get("seq"),
+                "ts": event.get("ts", ""),
+                # 用户消息是这一轮的开始，此时 TaskState 还没建，
+                # 它自带的 run 可能是上一轮的，所以这里一律留空，
+                # 由紧随其后的 run_started 补上。
+                "run": "",
+                "prompt": str(data.get("text", "")),
+                "answer": "",
+                "status": "",
+                "stopReason": "",
+                "durationMs": None,
+                "steps": [],
+            }
+            continue
+        if current is None:
+            continue
+        # user_message 是在 TaskState 创建之前写的，run 字段为空；
+        # 用同一轮里后面第一条带 run 的事件把它补齐，才能找到对应的 trace。
+        if not current["run"] and event.get("run"):
+            current["run"] = str(event["run"])
+        if kind == "assistant_message":
+            if str(data.get("kind", "")) in {"final", "stopped"} and data.get("text"):
+                current["answer"] = str(data["text"])
+        elif kind == "run_finished":
+            current["status"] = str(data.get("status", ""))
+            current["stopReason"] = str(data.get("stop_reason", ""))
+            current["durationMs"] = data.get("run_duration_ms")
+    if current is not None:
+        turns.append(current)
+
+    for turn in turns:
+        trace = _read_trace(store, session_id, turn["run"])
+        turn["steps"] = [
+            {
+                "event": str(item.get("event", "")),
+                "ts": item.get("created_at", ""),
+                "durationMs": item.get("duration_ms"),
+                "tool": item.get("name", ""),
+                "args": item.get("args") or {},
+                "status": item.get("tool_status", ""),
+                "stopReason": item.get("stop_reason", ""),
+                "trigger": item.get("trigger", ""),
+                "attempts": item.get("attempts"),
+                "toolSteps": item.get("tool_steps"),
+            }
+            for item in trace
+            if item.get("event") not in {"run_started", "run_finished"}
+        ]
+    return {"session": store.stat(session_id), "turns": turns, "eventCount": len(events)}
+
+
 def transcript_from_events(events):
     """把事件流压成前端直接能画的条目列表。"""
     items = []
@@ -450,6 +545,52 @@ def transcript_from_events(events):
                 }
             )
     return items
+
+
+_PICKER_LOCK = threading.Lock()
+
+
+def pick_folder_native(initial=""):
+    """弹出操作系统的原生目录选择框。
+
+    只在本地场景可用（服务跑在用户自己的桌面上）。用系统的文件夹对话框
+    而不是自己画一个，是因为用户要的就是"像选本地文件夹那样选"。
+    """
+    if os.name != "nt":
+        raise RuntimeError("native folder picker is only implemented on Windows")
+    if not _PICKER_LOCK.acquire(blocking=False):
+        raise RuntimeError("folder picker is already open")
+    try:
+        # 初始路径通过环境变量传入，而不是拼进脚本字符串：
+        # 路径里可能带引号，盘符根还会以反斜杠结尾，拼字符串会破语法。
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms;"
+            "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+            "$d.Description = 'Select workspace folder';"
+            "$d.ShowNewFolderButton = $true;"
+            "if ($env:HEPILOT_PICK_INITIAL) { $d.SelectedPath = $env:HEPILOT_PICK_INITIAL };"
+            "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }"
+        )
+        env = dict(os.environ)
+        env["HEPILOT_PICK_INITIAL"] = str(initial or os.path.expanduser("~"))
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            env=env,
+        )
+        chosen = (result.stdout or "").strip().splitlines()
+        path = chosen[-1].strip() if chosen else ""
+        if not path:
+            raise RuntimeError("no folder selected")
+        return path
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("folder picker timed out") from exc
+    finally:
+        _PICKER_LOCK.release()
 
 
 def list_directory(path):
@@ -554,6 +695,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                     session_id = unquote(rest[: -len("/events")])
                     after = int((query.get("after") or ["0"])[0] or 0)
                     return self._stream_events(session_id, after)
+                if rest.endswith("/trajectory"):
+                    session_id = unquote(rest[: -len("/trajectory")])
+                    return self._send_json(build_trajectory(self.manager.store, session_id))
                 session_id = unquote(rest)
                 header = self.manager.store.read_header(session_id)
                 if header is None:
@@ -577,8 +721,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         payload = self._read_json()
         try:
+            if path == "/api/pick-folder":
+                return self._send_json({"path": pick_folder_native(payload.get("initial", ""))})
             if path == "/api/sessions":
-                handle = self.manager.create(payload.get("workspace_root", ""), payload.get("title", ""))
+                handle = self.manager.create(
+                    payload.get("workspace_root", ""),
+                    payload.get("title", ""),
+                    payload.get("name", ""),
+                )
                 return self._send_json({"session": self.manager.store.stat(handle.agent.session["id"])})
             if path.startswith("/api/sessions/"):
                 rest = path[len("/api/sessions/"):]
@@ -608,6 +758,26 @@ class RequestHandler(BaseHTTPRequestHandler):
             return self._send_error_json(str(exc), 400)
         except RuntimeError as exc:
             return self._send_error_json(str(exc), 409)
+        except Exception as exc:
+            return self._send_error_json(f"{exc.__class__.__name__}: {exc}", 500)
+
+    def do_PATCH(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        payload = self._read_json()
+        try:
+            if path.startswith("/api/sessions/"):
+                session_id = unquote(path[len("/api/sessions/"):])
+                if self.manager.store.read_header(session_id) is None:
+                    return self._send_error_json("session not found", 404)
+                changes = {}
+                if "name" in payload:
+                    # name 只是展示名；session id 仍然是磁盘上和接口里的唯一标识。
+                    changes["name"] = str(payload.get("name") or "").strip()[:80]
+                if changes:
+                    self.manager.store.update_header(session_id, **changes)
+                return self._send_json({"session": self.manager.store.stat(session_id)})
+            return self._send_error_json("not found", 404)
         except Exception as exc:
             return self._send_error_json(f"{exc.__class__.__name__}: {exc}", 500)
 

@@ -130,6 +130,7 @@ class SessionStore:
         payload = {
             "format_version": SESSION_FORMAT_VERSION,
             "id": session_id,
+            "name": str(header.get("name", "") or "").strip(),
             "title": str(header.get("title", "") or "").strip(),
             "workspace_root": str(header.get("workspace_root", "")),
             "created_at": header.get("created_at") or utc_now(),
@@ -165,6 +166,7 @@ class SessionStore:
         events = self.events_path(session_id)
         return {
             "id": header.get("id", session_id),
+            "name": header.get("name", ""),
             "title": header.get("title", ""),
             "workspace_root": header.get("workspace_root", ""),
             "created_at": header.get("created_at", ""),
@@ -293,6 +295,7 @@ class SessionStore:
             )
         created = {
             "id": session_id,
+            "name": session.get("name", ""),
             "title": session.get("title", ""),
             "workspace_root": session.get("workspace_root", ""),
             "created_at": session.get("created_at") or header.get("created_at"),

@@ -668,7 +668,12 @@ class Hepilot:
         self.session["history"].append(item)
         event_type, data = history_item_to_event(item)
         if event_type:
-            run_id = getattr(getattr(self, "current_task_state", None), "run_id", "") or ""
+            # 用户消息是这一轮的开始，此时新 TaskState 还没建出来，
+            # current_task_state 还指向上一次运行——不能把旧 run_id 贴上去。
+            if item.get("role") == "user":
+                run_id = ""
+            else:
+                run_id = getattr(getattr(self, "current_task_state", None), "run_id", "") or ""
             self.session_store.append_event(self.session, event_type, data, run_id=run_id)
         return item
 
