@@ -380,7 +380,13 @@ def build_arg_parser():
 
 def main(argv=None):
     """CLI 总入口，负责 one-shot 与 REPL 两种运行模式切换。"""
-    args = build_arg_parser().parse_args(argv)
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    # `hepilot web` 走浏览器形态，其余参数仍由 argparse 处理。
+    if argv_list and argv_list[0] == "web":
+        from .web import main as web_main
+
+        return web_main(argv_list[1:])
+    args = build_arg_parser().parse_args(argv_list)
     try:
         agent = build_agent(args)
     except AgentStartupError as exc:

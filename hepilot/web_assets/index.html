@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>hepilot</title>
+<style>
+  :root {
+    --bg: #0b0c0e;
+    --panel: #13151a;
+    --panel-2: #171a20;
+    --border: #23262d;
+    --border-soft: #1c1f25;
+    --fg: #e7e8ea;
+    --dim: #9aa0a6;
+    --faint: #6b7178;
+    --accent: #5b8def;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg); font-family: var(--sans);
+    font-size: 14px; line-height: 1.6; overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font-family: inherit; font-size: inherit; cursor: pointer; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #2a2e36; border-radius: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  .app { display: grid; grid-template-columns: 272px 1fr; height: 100vh; }
+
+  /* ---- sidebar ---- */
+  .side {
+    background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 8px;
+    padding: 16px 16px 12px; font-weight: 600; letter-spacing: .2px;
+  }
+  .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+  .brand-sub { font-size: 11px; color: var(--faint); font-weight: 400; margin-left: auto; font-family: var(--mono); }
+
+  .new-btn {
+    margin: 0 12px 12px; padding: 9px 12px; border-radius: 8px;
+    background: var(--accent); color: #fff; border: none; font-weight: 500;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    transition: filter .15s;
+  }
+  .new-btn:hover { filter: brightness(1.08); }
+
+  .group-label {
+    padding: 10px 16px 4px; font-size: 11px; color: var(--faint);
+    text-transform: uppercase; letter-spacing: .8px; font-family: var(--mono);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .sessions { flex: 1; overflow-y: auto; padding-bottom: 12px; }
+  .session {
+    margin: 2px 8px; padding: 8px 10px; border-radius: 7px;
+    cursor: pointer; border: 1px solid transparent;
+  }
+  .session:hover { background: var(--panel-2); }
+  .session.active { background: var(--panel-2); border-color: var(--border); }
+  .session .t { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .session .m { font-size: 11px; color: var(--faint); font-family: var(--mono); margin-top: 2px; }
+  .badge { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 10px; font-family: var(--mono); }
+  .badge.running { background: rgba(210,153,34,.15); color: var(--warn); }
+
+  /* ---- main ---- */
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .topbar {
+    height: 48px; display: flex; align-items: center; gap: 10px;
+    padding: 0 20px; border-bottom: 1px solid var(--border); flex: 0 0 auto;
+  }
+  .topbar .title { font-weight: 500; }
+  .chip {
+    font-family: var(--mono); font-size: 11px; color: var(--dim);
+    background: var(--panel-2); border: 1px solid var(--border);
+    padding: 2px 8px; border-radius: 5px; white-space: nowrap;
+    max-width: 420px; overflow: hidden; text-overflow: ellipsis;
+  }
+  .spacer { flex: 1; }
+
+  .stream { flex: 1; overflow-y: auto; padding: 22px 0 8px; }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 0 24px; }
+
+  .empty {
+    height: 100%; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; color: var(--faint); gap: 10px; text-align: center;
+  }
+  .empty h2 { color: var(--fg); font-weight: 500; margin: 0; font-size: 20px; }
+  .empty p { margin: 0; font-size: 13px; }
+
+  .msg { margin: 16px 0; display: flex; gap: 12px; }
+  .msg .role {
+    font-family: var(--mono); font-size: 11px; color: var(--faint);
+    width: 58px; flex: 0 0 58px; padding-top: 3px; text-transform: uppercase;
+  }
+  .msg .body { flex: 1; min-width: 0; }
+  .msg.user .body .text { color: #f2f3f5; }
+  .msg .text { white-space: pre-wrap; word-break: break-word; }
+
+  .card {
+    border: 1px solid var(--border); border-radius: 9px; background: var(--panel);
+    margin: 10px 0; overflow: hidden;
+  }
+  .card-head {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    font-family: var(--mono); font-size: 12px; color: var(--dim);
+    background: var(--panel-2); border-bottom: 1px solid var(--border-soft);
+  }
+  .card-head .name { color: var(--fg); }
+  .card-head .args { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-body { padding: 10px 12px; font-family: var(--mono); font-size: 12px; color: var(--dim); }
+  .card-body pre { margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
+  .card.collapsed .card-body { display: none; }
+  .toggle { margin-left: auto; color: var(--faint); font-size: 11px; user-select: none; }
+  .card-head { cursor: pointer; }
+
+  .cp { display: flex; align-items: center; gap: 8px; color: var(--faint); font-family: var(--mono); font-size: 11px; margin: 10px 0; }
+  .cp::before { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+  .cp::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+
+  .err { border-left: 2px solid var(--err); padding: 6px 12px; color: #ffb3ad; font-family: var(--mono); font-size: 12px; }
+
+  .approval {
+    border: 1px solid rgba(210,153,34,.4); background: rgba(210,153,34,.07);
+    border-radius: 9px; padding: 12px; margin: 10px 0;
+  }
+  .approval .h { font-size: 12px; color: var(--warn); font-family: var(--mono); margin-bottom: 6px; }
+  .approval .b { display: flex; gap: 8px; margin-top: 10px; }
+  .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel-2); color: var(--fg); }
+  .btn:hover { background: #1f2329; }
+  .btn.ok { border-color: rgba(63,185,80,.5); color: var(--ok); }
+  .btn.no { border-color: rgba(248,81,73,.4); color: var(--err); }
+
+  .composer { flex: 0 0 auto; border-top: 1px solid var(--border); padding: 14px 0 18px; }
+  .composer .wrap { display: flex; flex-direction: column; gap: 8px; }
+  .input-wrap {
+    display: flex; align-items: flex-end; gap: 8px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px;
+  }
+  .input-wrap:focus-within { border-color: #34405a; }
+  textarea {
+    flex: 1; resize: none; border: none; outline: none; background: transparent;
+    color: var(--fg); font-family: var(--sans); font-size: 14px; line-height: 1.55;
+    max-height: 180px; min-height: 24px; padding: 3px 0;
+  }
+  .send {
+    border: none; background: var(--accent); color: #fff; border-radius: 7px;
+    padding: 7px 14px; font-weight: 500;
+  }
+  .send:disabled { opacity: .45; cursor: not-allowed; }
+  .hint { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+
+  /* ---- modal ---- */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.62);
+    display: none; align-items: center; justify-content: center; z-index: 50;
+  }
+  .overlay.show { display: flex; }
+  .modal {
+    width: 660px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px);
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .modal h3 { margin: 0; padding: 16px 18px 12px; font-size: 15px; font-weight: 500; }
+  .modal .path-row { display: flex; gap: 8px; padding: 0 18px 12px; }
+  .modal .path-row input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+    color: var(--fg); padding: 7px 10px; font-family: var(--mono); font-size: 12px; outline: none;
+  }
+  .browser { flex: 1; overflow-y: auto; border-top: 1px solid var(--border-soft); min-height: 200px; }
+  .entry {
+    display: flex; align-items: center; gap: 8px; padding: 6px 18px;
+    font-family: var(--mono); font-size: 12px; color: var(--dim); cursor: pointer;
+  }
+  .entry:hover { background: var(--panel-2); color: var(--fg); }
+  .entry .repo { color: var(--ok); font-size: 10px; }
+  .modal .foot { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 18px; border-top: 1px solid var(--border-soft); }
+  .modal .err-line { color: var(--err); font-family: var(--mono); font-size: 12px; padding: 0 18px 8px; min-height: 18px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <span class="dot"></span><span>hepilot</span>
+      <span class="brand-sub" id="modelChip">local coding agent</span>
+    </div>
+    <button class="new-btn" id="newBtn">＋ 新建会话</button>
+    <div class="sessions" id="sessions"></div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <span class="title" id="sessionTitle">未选择会话</span>
+      <span class="chip" id="workspaceChip">—</span>
+      <span class="spacer"></span>
+      <span class="chip" id="statusChip">idle</span>
+    </div>
+    <div class="stream" id="stream">
+      <div class="wrap">
+        <div class="empty">
+          <h2>开始一次会话</h2>
+          <p>点左上角「新建会话」，选一个代码仓库作为工作区。</p>
+        </div>
+      </div>
+    </div>
+    <div class="composer">
+      <div class="wrap">
+        <div class="input-wrap">
+          <textarea id="input" rows="1" placeholder="描述你想做的事，Enter 发送，Shift+Enter 换行"></textarea>
+          <button class="send" id="send" disabled>发送</button>
+        </div>
+        <div class="hint" id="hint">选择一个会话后即可发送</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <h3>选择工作区</h3>
+    <div class="path-row">
+      <input id="pathInput" placeholder="输入目录路径，或用下面的浏览器选择" />
+      <button class="btn" id="upBtn">上一级</button>
+    </div>
+    <div class="browser" id="browser"></div>
+    <div class="err-line" id="modalErr"></div>
+    <div class="foot">
+      <button class="btn" id="cancelBtn">取消</button>
+      <button class="btn ok" id="confirmBtn">用这个目录新建</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { sessions: [], current: null, lastSeq: 0, es: null, busy: false };
+
+function fmtTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+/* ---------------- sessions ---------------- */
+
+async function loadSessions() {
+  const data = await api("/api/sessions");
+  state.sessions = data.sessions || [];
+  renderSessions();
+}
+
+function renderSessions() {
+  const root = $("sessions");
+  root.innerHTML = "";
+  if (!state.sessions.length) {
+    root.innerHTML = '<div class="group-label">还没有会话</div>';
+    return;
+  }
+  let lastWorkspace = null;
+  for (const s of state.sessions) {
+    if (s.workspace_root !== lastWorkspace) {
+      lastWorkspace = s.workspace_root;
+      const label = document.createElement("div");
+      label.className = "group-label";
+      label.textContent = s.workspace_root;
+      label.title = s.workspace_root;
+      root.appendChild(label);
+    }
+    const el = document.createElement("div");
+    el.className = "session" + (s.id === state.current ? " active" : "");
+    el.innerHTML =
+      `<div class="t">${escapeHtml(s.title || s.id)}</div>` +
+      `<div class="m">${fmtTime(s.updated_at)} · ${s.event_count} 事件` +
+      (s.status === "running" ? ' <span class="badge running">运行中</span>' : "") +
+      `</div>`;
+    el.onclick = () => openSession(s.id);
+    root.appendChild(el);
+  }
+}
+
+/* ---------------- session view ---------------- */
+
+async function openSession(id) {
+  state.current = id;
+  state.lastSeq = 0;
+  closeStream();
+  const data = await api(`/api/sessions/${id}`);
+  state.lastSeq = data.lastSeq || 0;
+  $("sessionTitle").textContent = data.session.title || id;
+  $("workspaceChip").textContent = data.session.workspace_root;
+  $("workspaceChip").title = data.session.workspace_root;
+  $("statusChip").textContent = data.session.status || "idle";
+  $("send").disabled = false;
+  $("input").disabled = false;
+  $("hint").textContent = "Enter 发送 · Shift+Enter 换行";
+  const stream = $("stream");
+  stream.innerHTML = '<div class="wrap" id="wrap"></div>';
+  for (const item of data.transcript || []) renderItem(item, false);
+  scrollBottom();
+  openStream(id, state.lastSeq);
+  renderSessions();
+}
+
+function openStream(id, after) {
+  const es = new EventSource(`/api/sessions/${id}/events?after=${after}`);
+  state.es = es;
+  es.onmessage = (ev) => {
+    let event;
+    try { event = JSON.parse(ev.data); } catch { return; }
+    if (event.seq <= state.lastSeq) return;
+    state.lastSeq = event.seq;
+    renderItem(transcriptItem(event), true);
+    if (event.type === "run_finished" || event.type === "run_failed") {
+      state.busy = false;
+      $("statusChip").textContent = "idle";
+      $("send").disabled = false;
+      loadSessions();
+    }
+  };
+  es.onerror = () => { /* 浏览器会自动重连 */ };
+}
+
+function closeStream() {
+  if (state.es) { state.es.close(); state.es = null; }
+}
+
+function transcriptItem(event) {
+  const d = event.data || {};
+  switch (event.type) {
+    case "user_message": return { kind: "user", text: d.text };
+    case "assistant_message": return { kind: "assistant", text: d.text, toolUses: d.tool_uses || [] };
+    case "tool_executed": return { kind: "tool", name: d.name, args: d.args, result: d.result, synthetic: d.synthetic };
+    case "run_started": return { kind: "run_start" };
+    case "run_finished": return { kind: "run_end", status: d.status, stopReason: d.stop_reason, final: d.final_answer };
+    case "checkpoint_created": return { kind: "checkpoint", trigger: d.trigger };
+    case "model_failed": return { kind: "error", message: d.error_message };
+    case "approval_requested": return { kind: "approval", approvalId: d.approval_id, name: d.name, args: d.args };
+    case "approval_resolved": return { kind: "approval_resolved", approvalId: d.approval_id, approved: d.approved, reason: d.reason };
+    default: return null;
+  }
+}
+
+/* ---------------- rendering ---------------- */
+
+function escapeHtml(text) {
+  return String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function renderItem(item, live) {
+  const wrap = $("wrap");
+  if (!wrap || !item) return;
+  const el = document.createElement("div");
+
+  if (item.kind === "user" || item.kind === "assistant") {
+    el.className = `msg ${item.kind}`;
+    const label = item.kind === "user" ? "user" : "hepilot";
+    let extra = "";
+    if (item.toolUses && item.toolUses.length) {
+      extra = `<div class="card"><div class="card-body"><pre>${escapeHtml(
+        item.toolUses.map((t) => `→ ${t.name} ${compactArgs(t.args)}`).join("\n")
+      )}</pre></div></div>`;
+    }
+    el.innerHTML = `<div class="role">${label}</div><div class="body"><div class="text">${escapeHtml(item.text || "")}</div>${extra}</div>`;
+    if (!String(item.text || "").trim() && !extra) return;
+  } else if (item.kind === "tool") {
+    el.className = "card collapsed";
+    el.innerHTML =
+      `<div class="card-head"><span class="name">${escapeHtml(item.name)}</span>` +
+      `<span class="args">${escapeHtml(compactArgs(item.args))}</span>` +
+      `<span class="toggle">展开</span></div>` +
+      `<div class="card-body"><pre>${escapeHtml(truncate(item.result, 4000))}</pre></div>`;
+    const head = el.querySelector(".card-head");
+    head.onclick = () => {
+      el.classList.toggle("collapsed");
+      head.querySelector(".toggle").textContent = el.classList.contains("collapsed") ? "展开" : "收起";
+    };
+  } else if (item.kind === "run_end") {
+    el.className = "cp";
+    el.textContent = item.status === "completed" ? "本轮完成" : `本轮结束 · ${item.stopReason || item.status}`;
+  } else if (item.kind === "run_start") {
+    return;
+  } else if (item.kind === "checkpoint") {
+    el.className = "cp";
+    el.textContent = `checkpoint · ${item.trigger}`;
+  } else if (item.kind === "error") {
+    el.className = "err";
+    el.textContent = item.message || "unknown error";
+  } else if (item.kind === "approval") {
+    el.className = "approval";
+    el.innerHTML =
+      `<div class="h">需要审批 · ${escapeHtml(item.name)}</div>` +
+      `<div class="card-body" style="padding:0"><pre>${escapeHtml(compactArgs(item.args))}</pre></div>` +
+      `<div class="b"><button class="btn ok" data-ok="1">允许</button><button class="btn no" data-no="1">拒绝</button></div>`;
+    el.querySelector("[data-ok]").onclick = () => resolveApproval(item.approvalId, true, el);
+    el.querySelector("[data-no]").onclick = () => resolveApproval(item.approvalId, false, el);
+  } else if (item.kind === "approval_resolved") {
+    el.className = "cp";
+    el.textContent = item.approved ? "已允许" : `已拒绝${item.reason ? " · " + item.reason : ""}`;
+  } else {
+    return;
+  }
+
+  wrap.appendChild(el);
+  if (live) scrollBottom();
+}
+
+function compactArgs(args) {
+  if (!args || !Object.keys(args).length) return "";
+  const text = JSON.stringify(args);
+  return text.length > 120 ? text.slice(0, 120) + "…" : text;
+}
+
+function truncate(text, limit) {
+  const s = String(text ?? "");
+  return s.length > limit ? s.slice(0, limit) + `\n… (${s.length - limit} more chars)` : s;
+}
+
+function scrollBottom() {
+  const stream = $("stream");
+  stream.scrollTop = stream.scrollHeight;
+}
+
+async function resolveApproval(approvalId, approved, el) {
+  el.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  try {
+    await api(`/api/sessions/${state.current}/approvals/${approvalId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved }),
+    });
+  } catch (err) {
+    el.querySelector(".h").textContent = "审批失败：" + err.message;
+  }
+}
+
+/* ---------------- composer ---------------- */
+
+async function send() {
+  const input = $("input");
+  const text = input.value.trim();
+  if (!text || !state.current || state.busy) return;
+  state.busy = true;
+  $("send").disabled = true;
+  $("statusChip").textContent = "运行中";
+  input.value = "";
+  autosize();
+  try {
+    await api(`/api/sessions/${state.current}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  } catch (err) {
+    state.busy = false;
+    $("send").disabled = false;
+    $("statusChip").textContent = "idle";
+    renderItem({ kind: "error", message: err.message }, true);
+  }
+}
+
+function autosize() {
+  const input = $("input");
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 180) + "px";
+}
+
+/* ---------------- new session modal ---------------- */
+
+let browsePath = "";
+
+async function openModal() {
+  $("overlay").classList.add("show");
+  $("modalErr").textContent = "";
+  await browse("");
+}
+
+async function browse(path) {
+  try {
+    const data = await api(`/api/fs?path=${encodeURIComponent(path)}`);
+    browsePath = data.path;
+    $("pathInput").value = data.path;
+    const list = $("browser");
+    list.innerHTML = "";
+    for (const entry of data.entries) {
+      if (!entry.isDir) continue;
+      const row = document.createElement("div");
+      row.className = "entry";
+      row.innerHTML = `📁 ${escapeHtml(entry.name)}` + (entry.isRepo ? ' <span class="repo">● repo</span>' : "");
+      row.onclick = () => browse(entry.path);
+      list.appendChild(row);
+    }
+    if (!list.children.length) list.innerHTML = '<div class="entry" style="cursor:default">（没有子目录）</div>';
+    $("modalErr").textContent = data.isRepo ? "" : "提示：这个目录不是 git 仓库，也能用，但快照会少一部分信息。";
+  } catch (err) {
+    $("modalErr").textContent = err.message;
+  }
+}
+
+async function createSession() {
+  $("confirmBtn").disabled = true;
+  try {
+    const data = await api("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_root: $("pathInput").value || browsePath }),
+    });
+    $("overlay").classList.remove("show");
+    await loadSessions();
+    await openSession(data.session.id);
+  } catch (err) {
+    $("modalErr").textContent = err.message;
+  } finally {
+    $("confirmBtn").disabled = false;
+  }
+}
+
+/* ---------------- wiring ---------------- */
+
+$("newBtn").onclick = openModal;
+$("cancelBtn").onclick = () => $("overlay").classList.remove("show");
+$("confirmBtn").onclick = createSession;
+$("upBtn").onclick = () => { if (browsePath) browse(browsePath.replace(/[\\/][^\\/]+$/, "") || browsePath); };
+$("pathInput").onkeydown = (e) => { if (e.key === "Enter") browse($("pathInput").value); };
+$("overlay").onclick = (e) => { if (e.target === $("overlay")) $("overlay").classList.remove("show"); };
+
+$("send").onclick = send;
+$("input").oninput = autosize;
+$("input").onkeydown = (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+};
+
+loadSessions().catch((err) => renderItem({ kind: "error", message: err.message }, true));
+</script>
+</body>
+</html>

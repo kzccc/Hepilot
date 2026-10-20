@@ -102,8 +102,10 @@ def test_missing_session_becomes_controlled_failure(tmp_path, capsys):
 def test_corrupt_session_file_becomes_controlled_failure(tmp_path, capsys):
     _prepare_workspace(tmp_path)
     sessions_dir = tmp_path / ".hepilot" / "sessions"
-    sessions_dir.mkdir(parents=True)
-    (sessions_dir / "broken.json").write_text("{not json", encoding="utf-8")
+    # 集中式布局：<root>/--<workspace-slug>--/<session_id>/session.json
+    broken = sessions_dir / "--ws--" / "broken"
+    broken.mkdir(parents=True)
+    (broken / "session.json").write_text("{not json", encoding="utf-8")
 
     exit_code = _run_main(["--cwd", str(tmp_path), "--provider", "ollama", "--resume", "broken"])
 

@@ -19,6 +19,7 @@ from . import memory as memorylib
 from .context_manager import ContextManager
 from .run_store import RunStore
 from .task_state import STATUS_FAILED, STOP_REASON_RESUME_LOAD_ERROR, TaskState
+from .session_store import SessionStore as LegacySessionStore
 from . import tools as toolkit
 from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
 
@@ -128,6 +129,44 @@ def _redact_artifact(value, secret_env_names, key=None):
     return value
 
 
+# 这些事件要长期留在会话日志里（UI 会读、复盘要用）。
+# prompt_built / model_requested / model_parsed / tool_executed 不进这里：
+# 前三个是调试细节，最后一个由 record() 用完整内容写。
+SESSION_EVENT_TYPES = {
+    "run_started",
+    "run_finished",
+    "checkpoint_created",
+    "model_failed",
+    "resume_failed",
+    "approval_requested",
+    "approval_resolved",
+    "run_cancelled",
+}
+
+
+def history_item_to_event(item):
+    """把一条 history 条目映射成 (事件类型, data)；不是转录条目就返回 (None, None)。"""
+    role = item.get("role")
+    if role == "user":
+        return "user_message", {"text": str(item.get("content", ""))}
+    if role == "assistant":
+        data = {"text": str(item.get("content", ""))}
+        if item.get("tool_uses"):
+            data["tool_uses"] = item["tool_uses"]
+        return "assistant_message", data
+    if role == "tool":
+        data = {
+            "tool_use_id": str(item.get("parent_tool_use_id", "")),
+            "name": str(item.get("name", "")),
+            "args": item.get("args", {}) or {},
+            "result": str(item.get("content", "")),
+        }
+        if item.get("synthetic"):
+            data["synthetic"] = True
+        return "tool_executed", data
+    return None, None
+
+
 @dataclass
 class PromptPrefix:
     """可缓存的稳定 prompt 前缀及其校验元数据。"""
@@ -141,31 +180,12 @@ class PromptPrefix:
     built_at: str
 
 
-class SessionStore:
-    """管理可恢复 session 的读写。"""
+class SessionStore(LegacySessionStore):
+    """兼容旧名字。
 
-    def __init__(self, root):
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-
-    def path(self, session_id):
-        """返回 session JSON 文件路径。"""
-        return self.root / f"{session_id}.json"
-
-    def save(self, session):
-        """落盘保存当前 session。"""
-        path = self.path(session["id"])
-        path.write_text(json.dumps(session, indent=2), encoding="utf-8")
-        return path
-
-    def load(self, session_id):
-        """读取指定 session。"""
-        return json.loads(self.path(session_id).read_text(encoding="utf-8"))
-
-    def latest(self):
-        """返回最近一次修改的 session id。"""
-        files = sorted(self.root.glob("*.json"), key=lambda path: path.stat().st_mtime)
-        return files[-1].stem if files else None
+    真正的实现在 `hepilot/session_store.py`：集中式目录、事件日志、快照。
+    这里只保留一个别名，让 `from .runtime import SessionStore` 继续可用。
+    """
 
 
 class Hepilot:
@@ -235,6 +255,8 @@ class Hepilot:
         self.last_durable_rejections = []
         self.last_durable_superseded = []
         self._last_tool_result_metadata = {}
+        # 由前端注入；为 None 时 approve() 退回 stdin。
+        self.approval_handler = None
         self._last_prefix_refresh = {
             "workspace_changed": False,
             "prefix_changed": False,
@@ -615,10 +637,18 @@ class Hepilot:
         prompt, _ = self._build_prompt_and_metadata(user_message)
         return prompt
 
+    # 这两个事件本来就属于"转录"（谁说了什么、跑了哪个工具），
+    # 由 record() 写入 events.jsonl；emit_trace 里只留下观测字段给 run trace。
+    TRANSCRIPT_EVENT_WRITERS = {"tool_executed"}
+
     def record(self, item):
-        """向 session history 追加一条事件并控制总长度。"""
+        """向 session history 追加一条条目，并把它写进事件日志。"""
         self.session["history"].append(item)
-        self.session_path = self.session_store.save(self.session)
+        event_type, data = history_item_to_event(item)
+        if event_type:
+            run_id = getattr(getattr(self, "current_task_state", None), "run_id", "") or ""
+            self.session_store.append_event(self.session, event_type, data, run_id=run_id)
+        return item
 
     def record_synthetic_tool_results(self, task_state, tool_calls, reason, batch_size, start_index):
         """为未执行的 tool call 补写 synthetic result，并同步写入可配对的 trace 事件。"""
@@ -789,6 +819,15 @@ class Hepilot:
         payload["created_at"] = now()
         # trace 是运行中的逐事件时间线，适合回答“这一轮 agent 到底做了什么”。
         self.run_store.append_trace(task_state, payload)
+        # 会话级事件日志只收“需要长期保留、UI 要读”的那几类；
+        # prompt_built / model_requested / model_parsed 属于调试细节，留在 run trace 里。
+        if event in SESSION_EVENT_TYPES:
+            self.session_store.append_event(
+                self.session,
+                event,
+                dict(payload),
+                run_id=getattr(task_state, "run_id", "") or "",
+            )
         return payload
 
     def capture_workspace_snapshot(self):
@@ -1706,6 +1745,10 @@ class Hepilot:
             return True
         if self.approval_policy == "never":
             return False
+        # 非终端前端（web）会注入一个回调；没有回调才退回 stdin。
+        handler = getattr(self, "approval_handler", None)
+        if handler is not None:
+            return bool(handler(name, args))
         try:
             answer = input(f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] ")
         except EOFError:
@@ -1916,6 +1959,8 @@ class Hepilot:
         self.session["resume_state"] = {}
         self.session["runtime_identity"] = self.current_runtime_identity()
         self.memory = memorylib.LayeredMemory(self.session["memory"], workspace_root=self.root)
+        # 事件日志是追加的，"清空"必须显式记一笔，否则重载会把历史回放回来。
+        self.session_store.append_event(self.session, "session_reset", {})
         self.session_store.save(self.session)
 
     def path(self, raw_path):

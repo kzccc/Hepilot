@@ -32,6 +32,7 @@ htmlcov/
 tmp/
 .worktrees/
 .hepilot/
+.demo-sessions/
 artifacts/
 readme_intro_locked/
 
