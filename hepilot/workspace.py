@@ -72,6 +72,10 @@ class WorkspaceContext:
                     cwd=cwd,
                     capture_output=True,
                     text=True,
+                    # 显式固定 UTF-8：Windows 下 text=True 默认用 locale 编码(GBK)，
+                    # 而 git 输出的是 UTF-8，中文提交信息会直接解码失败。
+                    encoding="utf-8",
+                    errors="replace",
                     check=True,
                     timeout=5,
                 )
