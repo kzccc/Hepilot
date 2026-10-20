@@ -6,15 +6,55 @@ session history 负责保存完整事件流；这个模块只保存更小的一�
 """
 
 import hashlib
+import os
+import threading
 from datetime import datetime
 import re
 from pathlib import Path
 
 from .workspace import clip, now
+from .session_store import atomic_write_text
 
 WORKING_FILE_LIMIT = 8
 EPISODIC_NOTE_LIMIT = 12
 FILE_SUMMARY_LIMIT = 6
+
+# 哪些 topic 属于“这个仓库”，哪些属于“这个用户”。
+# 项目约定 / 决策 / 依赖是仓库属性，换仓库就该换一份；
+# 用户偏好是跨仓库的，必须跟着人走，否则换个仓库开工偏好就丢了。
+DURABLE_TOPIC_SCOPES = {
+    "project-conventions": "workspace",
+    "key-decisions": "workspace",
+    "dependency-facts": "workspace",
+    "user-preferences": "user",
+}
+
+
+def default_user_memory_root():
+    """用户级 durable memory 的默认根目录。
+
+    没有可用的 home（例如清空了 HOME/USERPROFILE 的环境）时返回 None，
+    表示"不启用跨仓库记忆"，而不是让调用方崩掉。
+    """
+    override = os.environ.get("HEPILOT_MEMORY_ROOT", "").strip()
+    if override:
+        return Path(override)
+    try:
+        return Path.home() / ".hepilot" / "memory"
+    except (RuntimeError, OSError, KeyError):
+        return None
+
+
+def durable_roots(workspace_root=None, user_root=None):
+    """返回 (工作区级根, 用户级根)。"""
+    workspace = Path(workspace_root) / ".hepilot" / "memory" if workspace_root else None
+    user = Path(user_root) if user_root else default_user_memory_root()
+    return workspace, user
+
+
+def scope_for_topic(topic):
+    """topic 属于哪一级；未知 topic 按工作区级处理。"""
+    return DURABLE_TOPIC_SCOPES.get(str(topic), "workspace")
 
 DURABLE_TOPIC_DEFAULTS = {
     "project-conventions": {
@@ -74,6 +114,17 @@ def _score_retrieval_note(query_tokens, note, extra_tokens=None, tie_breaker=0):
     return (exact_tag_match, keyword_overlap, recency, tie_breaker)
 
 
+_LOCKS = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(root):
+    """按根目录返回一把进程内锁。"""
+    key = str(Path(root))
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(key, threading.Lock())
+
+
 class DurableMemoryStore:
     """落盘保存跨 session 的 durable memory 主题与笔记。"""
 
@@ -81,6 +132,9 @@ class DurableMemoryStore:
         self.root = Path(root)
         self.index_path = self.root / "MEMORY.md"
         self.topics_dir = self.root / "topics"
+        # 同一个工作区可能被多个会话同时 promote，写同一份 MEMORY.md / topic 文件。
+        # 锁的粒度按根目录算：不同工作区互不影响，同一工作区内部串行。
+        self._lock = _lock_for(self.root)
 
     def topic_slugs(self):
         """返回 durable memory 里所有 topic slug。"""
@@ -221,7 +275,7 @@ class DurableMemoryStore:
             lines.append(f"- [{topic['topic']}](topics/{topic['topic']}.md): {topic['title']}")
             lines.append(f"  - summary: {topic['summary']}")
             lines.append(f"  - tags: {', '.join(topic['tags'])}")
-        self.index_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        atomic_write_text(self.index_path, "\n".join(lines).rstrip() + "\n")
 
     def _write_topic(self, topic, notes):
         """写回某个 topic 的 markdown 文件。"""
@@ -239,12 +293,17 @@ class DurableMemoryStore:
         ]
         for note in notes:
             lines.append(f"- {note}")
-        (self.topics_dir / f"{topic}.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        atomic_write_text(self.topics_dir / f"{topic}.md", "\n".join(lines).rstrip() + "\n")
 
     def promote(self, promotions):
         if not promotions:
             # 没有要写入的内容，直接返回空列表
             return [], []
+        # 读-改-写必须串行：同一工作区的多个会话会改同一份 MEMORY.md。
+        with self._lock:
+            return self._promote_unlocked(promotions)
+
+    def _promote_unlocked(self, promotions):
         # 从 MEMORY.md 读出已有的 topic 索引，按 topic 名做 key
         topics = {topic["topic"]: topic for topic in self.load_index()}
         # 从 topics/*.md 读出每个 topic 下的已有笔记文本列表
@@ -407,7 +466,7 @@ def _normalize_note(note, index):
     }
 
 
-def normalize_memory_state(state, workspace_root=None):
+def normalize_memory_state(state, workspace_root=None, user_root=None):
     """把旧格式或不完整的 memory state 规整成当前标准结构。"""
     if state is None:
         state = default_memory_state()
@@ -495,9 +554,19 @@ def normalize_memory_state(state, workspace_root=None):
     state["task"] = working["task_summary"]
     state["files"] = list(working["recent_files"])
     state["notes"] = [note["text"] for note in episodic_notes]
-    durable_root = Path(workspace_root) / ".hepilot" / "memory" if workspace_root is not None else None
-    durable_store = DurableMemoryStore(durable_root) if durable_root is not None else None
-    state["durable_topics"] = durable_store.topic_slugs() if durable_store is not None else []
+    # durable topic 索引：工作区级始终统计，用户级只在显式启用时统计，
+    # 这样不传 user_root 的调用方（含测试）行为完全不变。
+    workspace_path, user_path = durable_roots(workspace_root, user_root)
+    slugs = []
+    if workspace_path is not None:
+        for slug in DurableMemoryStore(workspace_path).topic_slugs():
+            if slug not in slugs:
+                slugs.append(slug)
+    if user_root is not None and user_path is not None:
+        for slug in DurableMemoryStore(user_path).topic_slugs():
+            if slug not in slugs:
+                slugs.append(slug)
+    state["durable_topics"] = slugs
     return state
 
 
@@ -611,9 +680,9 @@ def summarize_read_result(result, limit=180):
     return clip(summary, limit)
 
 
-def retrieval_candidates(state, query, limit=3, workspace_root=None):
-    """从 episodic memory 和 durable memory 里统一召回候选笔记。"""
-    state = normalize_memory_state(state, workspace_root)
+def retrieval_candidates(state, query, limit=3, workspace_root=None, user_root=None):
+    """从 episodic memory 和两级 durable memory 里统一召回候选笔记。"""
+    state = normalize_memory_state(state, workspace_root, user_root)
     query_tokens = _tokenize(query)
     ranked = []
     for note in state["episodic_notes"]:
@@ -622,18 +691,25 @@ def retrieval_candidates(state, query, limit=3, workspace_root=None):
             continue
         ranked.append((score, note))
 
+    # 工作区级 durable：这个仓库的约定/决策/依赖。
     if workspace_root is not None:
         durable_store = DurableMemoryStore(Path(workspace_root) / ".hepilot" / "memory")
         for score, note in durable_store.ranked_retrieval_candidates(query, limit=limit):
+            ranked.append((score, note))
+
+    # 用户级 durable：跨仓库的个人偏好，跟着人走。
+    if user_root is not None:
+        user_store = DurableMemoryStore(Path(user_root))
+        for score, note in user_store.ranked_retrieval_candidates(query, limit=limit):
             ranked.append((score, note))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
     return [note for _, note in ranked[:limit]]
 
 
-def retrieval_view(state, query, limit=3, workspace_root=None):
+def retrieval_view(state, query, limit=3, workspace_root=None, user_root=None):
     """把召回结果渲染成给模型看的紧凑文本。"""
-    candidates = retrieval_candidates(state, query, limit=limit, workspace_root=workspace_root)
+    candidates = retrieval_candidates(state, query, limit=limit, workspace_root=workspace_root, user_root=user_root)
     lines = ["Relevant memory:"]
     if not candidates:
         lines.append("- none")
@@ -691,14 +767,17 @@ class LayeredMemory:
     durable store 和 state 变更封装在一起。
     """
 
-    def __init__(self, state=None, workspace_root=None):
+    def __init__(self, state=None, workspace_root=None, user_root=None):
         self.workspace_root = workspace_root
-        self.state = normalize_memory_state(state, workspace_root)
+        # user_root 为 None 时不启用用户级 durable（测试与旧调用方行为不变）。
+        self.user_root = user_root
+        self.state = normalize_memory_state(state, workspace_root, user_root)
         self.durable_store = DurableMemoryStore(Path(workspace_root) / ".hepilot" / "memory") if workspace_root is not None else None
+        self.user_store = DurableMemoryStore(Path(user_root)) if user_root is not None else None
 
     def to_dict(self):
         """返回规范化后的原始状态字典。"""
-        self.state = normalize_memory_state(self.state, self.workspace_root)
+        self.state = normalize_memory_state(self.state, self.workspace_root, self.user_root)
         return self.state
 
     def canonical_path(self, path):
@@ -739,19 +818,40 @@ class LayeredMemory:
         return invalidated
 
     def retrieval_candidates(self, query, limit=3):
-        return retrieval_candidates(self.state, query, limit=limit, workspace_root=self.workspace_root)
+        return retrieval_candidates(
+            self.state, query, limit=limit, workspace_root=self.workspace_root, user_root=self.user_root
+        )
 
     def retrieval_view(self, query, limit=3):
-        return retrieval_view(self.state, query, limit=limit, workspace_root=self.workspace_root)
+        return retrieval_view(
+            self.state, query, limit=limit, workspace_root=self.workspace_root, user_root=self.user_root
+        )
 
     def render_memory_text(self):
         return render_memory_text(self.state, self.workspace_root)
 
     def promote_durable(self, promotions):
-        """将筛选后的长期事实持久化，并同步刷新内存态。"""
-        if self.durable_store is None:
+        """把长期事实按作用域分流写入。
+
+        工作区级（项目约定/决策/依赖）落 `<repo>/.hepilot/memory/`；
+        用户级（偏好）落 `~/.hepilot/memory/`，跟着人走而不是跟着仓库走。
+        """
+        if self.durable_store is None and self.user_store is None:
             return [], []
-        self.state = normalize_memory_state(self.state, self.workspace_root)
-        promoted, superseded = self.durable_store.promote(promotions)
-        self.state = normalize_memory_state(self.state, self.workspace_root)
+        self.state = normalize_memory_state(self.state, self.workspace_root, self.user_root)
+
+        workspace_items = [(topic, text) for topic, text in promotions if scope_for_topic(topic) == "workspace"]
+        user_items = [(topic, text) for topic, text in promotions if scope_for_topic(topic) == "user"]
+
+        promoted, superseded = [], []
+        if workspace_items and self.durable_store is not None:
+            done, replaced = self.durable_store.promote(workspace_items)
+            promoted += done
+            superseded += replaced
+        if user_items and self.user_store is not None:
+            done, replaced = self.user_store.promote(user_items)
+            promoted += done
+            superseded += replaced
+
+        self.state = normalize_memory_state(self.state, self.workspace_root, self.user_root)
         return promoted, superseded

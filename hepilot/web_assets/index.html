@@ -171,6 +171,11 @@
     padding: 7px 14px; font-weight: 500;
   }
   .send:disabled { opacity: .45; cursor: not-allowed; }
+  .stop {
+    border: 1px solid rgba(248,81,73,.45); background: transparent; color: var(--err);
+    border-radius: 7px; padding: 7px 12px; font-weight: 500;
+  }
+  .stop:disabled { opacity: .35; cursor: not-allowed; border-color: var(--border); color: var(--faint); }
   .hint { font-size: 11px; color: var(--faint); font-family: var(--mono); }
 
   /* ---- modal ---- */
@@ -231,6 +236,7 @@
       <div class="wrap">
         <div class="input-wrap">
           <textarea id="input" rows="1" placeholder="描述你想做的事，Enter 发送，Shift+Enter 换行"></textarea>
+          <button class="stop" id="stop" disabled>停止</button>
           <button class="send" id="send" disabled>发送</button>
         </div>
         <div class="hint" id="hint">选择一个会话后即可发送</div>
@@ -347,6 +353,7 @@ function openStream(id, after) {
       state.busy = false;
       $("statusChip").textContent = "idle";
       $("send").disabled = false;
+      $("stop").disabled = true;
       loadSessions();
     }
   };
@@ -534,8 +541,9 @@ async function send() {
   const input = $("input");
   const text = input.value.trim();
   if (!text || !state.current || state.busy) return;
-  state.busy = true;
+    state.busy = true;
   $("send").disabled = true;
+  $("stop").disabled = false;
   $("statusChip").textContent = "运行中";
   input.value = "";
   autosize();
@@ -557,6 +565,17 @@ function autosize() {
   const input = $("input");
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, 180) + "px";
+}
+
+async function stop() {
+  if (!state.current || !state.busy) return;
+  $("stop").disabled = true;
+  $("statusChip").textContent = "正在停止…";
+  try {
+    await api(`/api/sessions/${state.current}/cancel`, { method: "POST" });
+  } catch (err) {
+    renderItem({ kind: "error", message: err.message }, true);
+  }
 }
 
 /* ---------------- new session modal ---------------- */
@@ -619,6 +638,7 @@ $("pathInput").onkeydown = (e) => { if (e.key === "Enter") browse($("pathInput")
 $("overlay").onclick = (e) => { if (e.target === $("overlay")) $("overlay").classList.remove("show"); };
 
 $("send").onclick = send;
+$("stop").onclick = stop;
 $("input").oninput = autosize;
 $("input").onkeydown = (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }

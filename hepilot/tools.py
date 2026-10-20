@@ -4,9 +4,13 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
+import os
 import shutil
+import signal
 import subprocess
+import tempfile
 import textwrap
+import time
 from functools import partial
 
 from .workspace import IGNORED_PATH_NAMES, clip
@@ -215,35 +219,103 @@ def tool_search(agent, args):
     return "\n".join(matches) or "(no matches)"
 
 
+def _kill_tree(process):
+    """杀掉整个进程树。
+
+    `shell=True` 时子进程其实是 `cmd /c ...` 或 `sh -c ...` 包了一层，
+    直接 kill 只杀掉这层壳，真正的命令会变成孤儿继续跑。
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=10,
+            )
+        else:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except Exception:
+        # 进程树杀不掉时退回单进程 kill，至少别让调用方崩。
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
 def tool_run_shell(agent, args):
-    """在受控环境变量白名单下执行 shell 命令。"""
+    """在受控环境变量白名单下执行 shell 命令，并支持中途取消。
+
+    为什么不用 subprocess.run：
+    - 它一旦进去就没办法从外部打断，用户点"停止"也停不下来。
+    为什么不用 PIPE + communicate：
+    - 输出超过管道缓冲区会把子进程堵死；而在 Windows 上
+      `communicate(timeout)` 超时后再 `communicate()` 还可能永久阻塞。
+    所以这里的做法是：输出重定向到临时文件，主循环只用 poll() 探活，
+    取消/超时就 kill。这样既不堵管道，也不会卡在读取上。
+    """
     command = str(args.get("command", "")).strip()
     if not command:
         raise ValueError("command must not be empty")
     timeout = int(args.get("timeout", 20))
     if timeout < 1 or timeout > 120:
         raise ValueError("timeout must be in [1, 120]")
-    result = subprocess.run(
-        command,
-        cwd=agent.root,
-        shell=True,
-        capture_output=True,
-        text=True,
-        # 固定 UTF-8：Windows 下默认按 locale 解码，命令输出里的 UTF-8 会炸。
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        # 这里传入的是过滤后的环境变量，而不是直接继承整个父 shell 环境，
-        # 目的是减少敏感信息被意外带进命令执行环境的风险。
-        env=agent.shell_env(),
-    )
+    cancel = getattr(agent, "cancel_token", None)
+
+    cancelled = False
+    timed_out = False
+    with tempfile.TemporaryFile() as out_file, tempfile.TemporaryFile() as err_file:
+        process = subprocess.Popen(
+            command,
+            cwd=agent.root,
+            shell=True,
+            stdout=out_file,
+            stderr=err_file,
+            # POSIX 下让子进程自成一个进程组，取消时才能整组杀掉。
+            start_new_session=(os.name != "nt"),
+            # 这里传入的是过滤后的环境变量，而不是直接继承整个父 shell 环境，
+            # 目的是减少敏感信息被意外带进命令执行环境的风险。
+            env=agent.shell_env(),
+        )
+        deadline = time.monotonic() + timeout
+        while process.poll() is None:
+            if cancel is not None and cancel.is_set():
+                _kill_tree(process)
+                cancelled = True
+                break
+            if time.monotonic() >= deadline:
+                _kill_tree(process)
+                timed_out = True
+                break
+            time.sleep(0.1)
+
+        if cancelled:
+            # 取消时不需要命令输出，最多等 2 秒就走了。
+            # 等太久会让前端"正在停止"卡住十几秒。
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            raise RuntimeError("cancelled by user")
+
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        out_file.seek(0)
+        err_file.seek(0)
+        stdout = out_file.read().decode("utf-8", "replace")
+        stderr = err_file.read().decode("utf-8", "replace")
+
+    if timed_out:
+        raise subprocess.TimeoutExpired(command, timeout)
+
     return textwrap.dedent(
         f"""\
-        exit_code: {result.returncode}
+        exit_code: {process.returncode}
         stdout:
-        {result.stdout.strip() or "(empty)"}
+        {stdout.strip() or "(empty)"}
         stderr:
-        {result.stderr.strip() or "(empty)"}
+        {stderr.strip() or "(empty)"}
         """
     ).strip()
 
@@ -298,6 +370,7 @@ def tool_delegate(agent, args):
         read_only=True,
         secret_env_names=agent.secret_env_names,
         shell_env_allowlist=agent.shell_env_allowlist,
+        user_memory_root=getattr(agent, "user_memory_root", None),
     )
     # 委派的目标是“调查”，不是“放权执行”。
     # 子 agent 以只读方式运行、步数更少，最后只把结论文本返回给父 agent。

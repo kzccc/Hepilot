@@ -128,6 +128,9 @@ class SessionHandle:
         # 流式输出：模型每吐一块文本，就落一条 assistant_delta 事件。
         self.agent.stream_sink = self._on_delta
         self.agent.stream_flush = self._flush_delta
+        # 取消令牌：前端 POST /cancel 置位，runtime 在循环边界和流式读取处检查。
+        self.cancel_event = threading.Event()
+        self.agent.cancel_token = self.cancel_event
         self._delta_buf = []
         self._delta_text = ""
         self._delta_started = False
@@ -275,6 +278,7 @@ class SessionManager:
             max_steps=self.config.max_steps,
             max_new_tokens=self.config.max_new_tokens,
             secret_env_names=tuple(self.config.secret_env_names or ()),
+            user_memory_root=memorylib.default_user_memory_root(),
         )
         return agent
 
@@ -302,6 +306,7 @@ class SessionManager:
             raise RuntimeError("session is busy")
         handle.running = True
         handle._reset_delta()
+        handle.cancel_event.clear()
         self.store.update_header(session_id, status="running")
 
         def worker():
@@ -327,6 +332,16 @@ class SessionManager:
         thread = threading.Thread(target=worker, name=f"ask-{session_id}", daemon=True)
         thread.start()
         return handle
+
+
+    def cancel(self, session_id):
+        """请求取消当前运行。真正的收口由 runtime 在检查点完成。"""
+        handle = self.handle(session_id)
+        if not handle.running:
+            return False
+        handle.cancel_event.set()
+        self.store.append_event(handle.agent.session, "cancel_requested", {"reason": "user_cancelled"})
+        return True
 
 
 # --------------------------------------------------------------------- 路由
@@ -549,6 +564,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                         return self._send_error_json("text must not be empty")
                     self.manager.submit(session_id, text)
                     return self._send_json({"ok": True}, 202)
+                if rest.endswith("/cancel"):
+                    session_id = unquote(rest[: -len("/cancel")])
+                    ok = self.manager.cancel(session_id)
+                    return self._send_json({"ok": ok})
             return self._send_error_json("not found", 404)
         except KeyError as exc:
             return self._send_error_json(str(exc), 404)

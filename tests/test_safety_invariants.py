@@ -144,16 +144,31 @@ def test_run_shell_uses_allowlisted_environment_only(tmp_path):
 def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="auto")
 
-    with patch("hepilot.tools.subprocess.run") as fake_run:
-        fake_run.return_value = type(
-            "Result",
-            (),
-            {"returncode": 0, "stdout": "toolkit-shell\n", "stderr": ""},
-        )()
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, *args, **kwargs):
+            # 真实实现把输出重定向到临时文件；这里模拟子进程往里写。
+            kwargs["stdout"].write(b"toolkit-shell\n")
+            self.args = args
+            self.kwargs = kwargs
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            return None
+
+    # run_shell 用 Popen + 轮询 + 临时文件，而不是 subprocess.run：
+    # 这样才能在取消时 kill 子进程，也不会被管道堵住。
+    with patch("hepilot.tools.subprocess.Popen", side_effect=FakeProcess) as fake_popen:
         shell_result = agent.tool_run_shell({"command": "echo bypass", "timeout": 20})
 
     assert "toolkit-shell" in shell_result
-    fake_run.assert_called_once()
+    fake_popen.assert_called_once()
     assert agent.tool_run_shell.__func__.__module__ == "hepilot.runtime"
 
     with patch("hepilot.tools.tool_delegate", return_value="toolkit-delegate") as fake_delegate:

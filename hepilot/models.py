@@ -17,6 +17,16 @@ def _retry_delay_seconds(attempt):
     return 0.5 * (attempt + 1)
 
 
+def _check_cancel(cancel):
+    """取消令牌被置位时中止当前调用。
+
+    抛 RuntimeError 而不是专用异常，是为了让 runtime 只需要在一个地方
+    （ask 的 except）把"取消"和"模型失败"区分开。
+    """
+    if cancel is not None and cancel.is_set():
+        raise RuntimeError("cancelled by user")
+
+
 class FakeModelClient:
     """测试替身模型，按预设顺序吐出固定响应。"""
 
@@ -48,11 +58,12 @@ class OllamaModelClient:
         self.supports_prompt_cache = False
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, on_delta=None, **kwargs):
+    def complete(self, prompt, max_new_tokens, on_delta=None, cancel=None, **kwargs):
         # Ollama 当前不支持我们这里接入的 prompt cache 语义，
         # 所以 runtime 传下来的缓存参数会被忽略。
+        _check_cancel(cancel)
         if on_delta is not None:
-            return self._complete_stream(prompt, max_new_tokens, on_delta)
+            return self._complete_stream(prompt, max_new_tokens, on_delta, cancel)
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
@@ -90,7 +101,7 @@ class OllamaModelClient:
             raise RuntimeError(f"Ollama error: {data['error']}")
         return data.get("response", "")
 
-    def _complete_stream(self, prompt, max_new_tokens, on_delta):
+    def _complete_stream(self, prompt, max_new_tokens, on_delta, cancel=None):
         """Ollama 的流式是 NDJSON：一行一个 JSON，`response` 是文本增量。"""
         self.last_completion_metadata = {}
         payload = {
@@ -115,6 +126,7 @@ class OllamaModelClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 for raw_line in response:
+                    _check_cancel(cancel)
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line:
                         continue
@@ -290,20 +302,26 @@ class OpenAICompatibleModelClient:
         )
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None):
+    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None, cancel=None):
         """按探测到的接口风格发起一次调用，可选地流式回吐文本增量。"""
+        _check_cancel(cancel)
         if self.api_style == "chat":
-            return self._complete_chat(prompt, max_new_tokens, on_delta)
-        return self._complete_responses(prompt, max_new_tokens, prompt_cache_key, prompt_cache_retention, on_delta)
+            return self._complete_chat(prompt, max_new_tokens, on_delta, cancel)
+        return self._complete_responses(prompt, max_new_tokens, prompt_cache_key, prompt_cache_retention, on_delta, cancel)
 
-    def _complete_chat(self, prompt, max_new_tokens, on_delta=None):
-        """`/chat/completions` 路径：DeepSeek 等只提供这个接口的后端走这里。"""
+    def _complete_chat(self, prompt, max_new_tokens, on_delta=None, cancel=None):
+        """`/chat/completions` 路径：DeepSeek 等只提供这个接口的后端走这里。
+
+        流式时逐行读响应，而不是先 read() 再解析——否则既不是真流式，
+        也没法在生成中途响应取消。
+        """
         self.last_completion_metadata = {}
+        streaming = on_delta is not None
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_new_tokens,
-            "stream": bool(on_delta is not None),
+            "stream": streaming,
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
@@ -321,10 +339,18 @@ class OpenAICompatibleModelClient:
 
         attempts = 3
         for attempt in range(attempts):
+            _check_cancel(cancel)
+            streamed_text = None
+            body_text = None
+            is_stream = False
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    body_text = response.read().decode("utf-8", errors="replace")
                     content_type = (getattr(response, "headers", {}) or {}).get("Content-Type", "")
+                    is_stream = streaming or content_type.startswith("text/event-stream")
+                    if is_stream:
+                        streamed_text = self._read_chat_stream(response, on_delta, cancel)
+                    else:
+                        body_text = response.read().decode("utf-8", errors="replace")
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
                 if exc.code >= 500 and attempt < attempts - 1:
@@ -341,8 +367,8 @@ class OpenAICompatibleModelClient:
                     f"Model: {self.model}"
                 ) from exc
 
-            if payload["stream"] or content_type.startswith("text/event-stream") or body_text.lstrip().startswith("data:"):
-                text = self._consume_chat_stream(body_text, on_delta)
+            if is_stream or (body_text or "").lstrip().startswith("data:"):
+                text = streamed_text if streamed_text is not None else self._consume_chat_stream(body_text or "", on_delta)
                 if text:
                     return text
                 if attempt < attempts - 1:
@@ -376,7 +402,7 @@ class OpenAICompatibleModelClient:
                 continue
             raise RuntimeError("OpenAI-compatible error: could not extract text from response")
 
-    def _complete_responses_stream(self, prompt, max_new_tokens, prompt_cache_key, prompt_cache_retention, on_delta):
+    def _complete_responses_stream(self, prompt, max_new_tokens, prompt_cache_key, prompt_cache_retention, on_delta, cancel=None):
         """`/responses` 的流式实现：逐行读 SSE，遇到文本增量就回调。"""
         self.last_completion_metadata = {}
         payload = {
@@ -406,6 +432,7 @@ class OpenAICompatibleModelClient:
         pieces = []
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             for raw_line in response:
+                _check_cancel(cancel)
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line.startswith("data:"):
                     continue
@@ -425,7 +452,32 @@ class OpenAICompatibleModelClient:
                         on_delta(delta)
         return "".join(pieces)
 
-    def _consume_chat_stream(self, body_text, on_delta):
+    def _read_chat_stream(self, response, on_delta, cancel=None):
+        """逐行读 SSE 响应：这才是真正的增量，且能在中途检查取消。"""
+        pieces = []
+        for raw_line in response:
+            _check_cancel(cancel)
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if event.get("error"):
+                raise RuntimeError(f"OpenAI-compatible error: {event['error']}")
+            for choice in event.get("choices") or []:
+                delta = (choice.get("delta") or {}).get("content")
+                if isinstance(delta, str) and delta:
+                    pieces.append(delta)
+                    if on_delta is not None:
+                        on_delta(delta)
+        return "".join(pieces)
+
+    def _consume_chat_stream(self, body_text, on_delta, cancel=None):
         """解析 chat/completions 的 SSE 流，逐块回调并拼接全文。"""
         pieces = []
         for line in body_text.splitlines():
@@ -449,7 +501,7 @@ class OpenAICompatibleModelClient:
                         on_delta(delta)
         return "".join(pieces)
 
-    def _complete_responses(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None):
+    def _complete_responses(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None, cancel=None):
         """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
 
         为什么存在：
@@ -469,7 +521,7 @@ class OpenAICompatibleModelClient:
         # 流式走独立实现：它必须边读边回调，不能等 read() 一次性读完。
         if on_delta is not None:
             return self._complete_responses_stream(
-                prompt, max_new_tokens, prompt_cache_key, prompt_cache_retention, on_delta
+                prompt, max_new_tokens, prompt_cache_key, prompt_cache_retention, on_delta, cancel
             )
         #每次回答前先将上一次回答细节清空,准备这次存入
         self.last_completion_metadata = {}
@@ -612,13 +664,14 @@ class AnthropicCompatibleModelClient:
         self.supports_prompt_cache = False
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None):
+    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None, cancel=None):
         """向 Anthropic-compatible 后端发起一次文本请求，可选流式。"""
         # 为了保持统一接口，runtime 仍然会传缓存参数进来；
         # 这里只是显式丢弃，因为当前 Anthropic-compatible 路径没有接缓存复用。
         del prompt_cache_key, prompt_cache_retention
+        _check_cancel(cancel)
         if on_delta is not None:
-            return self._complete_stream(prompt, max_new_tokens, on_delta)
+            return self._complete_stream(prompt, max_new_tokens, on_delta, cancel)
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
@@ -692,7 +745,7 @@ class AnthropicCompatibleModelClient:
                 continue
             raise RuntimeError("Anthropic-compatible error: could not extract text from response")
 
-    def _complete_stream(self, prompt, max_new_tokens, on_delta):
+    def _complete_stream(self, prompt, max_new_tokens, on_delta, cancel=None):
         """Anthropic 流式：SSE 的 `content_block_delta` 里带 `text_delta`。"""
         self.last_completion_metadata = {}
         payload = {
@@ -719,6 +772,7 @@ class AnthropicCompatibleModelClient:
         pieces = []
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             for raw_line in response:
+                _check_cancel(cancel)
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line.startswith("data:"):
                     continue

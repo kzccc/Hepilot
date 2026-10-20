@@ -15,6 +15,7 @@ import tomllib
  
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
 from .runtime import Hepilot, SessionStore, record_resume_failure
+from .memory import default_user_memory_root
 from .workspace import WorkspaceContext, middle
 
 
@@ -321,6 +322,7 @@ def build_agent(args):
                 max_steps=args.max_steps,
                 max_new_tokens=args.max_new_tokens,
                 secret_env_names=configured_secret_names,
+                user_memory_root=default_user_memory_root(),
             )
         except Exception as exc:
             # 恢复失败同样要按“受控失败”收口：写状态机、trace、report，
@@ -341,6 +343,7 @@ def build_agent(args):
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,
         secret_env_names=configured_secret_names,
+        user_memory_root=default_user_memory_root(),
     )
 
 

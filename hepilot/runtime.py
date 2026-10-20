@@ -214,10 +214,13 @@ class Hepilot:
         shell_env_allowlist=None,
         secret_env_names=None,
         feature_flags=None,
+        user_memory_root=None,
     ):
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
+        # 用户级 durable memory 的根；None 表示不启用跨仓库偏好。
+        self.user_memory_root = user_memory_root
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = max_steps
@@ -242,6 +245,7 @@ class Hepilot:
         self.memory = memorylib.LayeredMemory(
             self.session.setdefault("memory", memorylib.default_memory_state()),
             workspace_root=self.root,
+            user_root=user_memory_root,
         )
         self.session["memory"] = self.memory.to_dict()
         self.tools = self.build_tools()
@@ -264,6 +268,8 @@ class Hepilot:
         self.stream_sink = None
         # 由前端注入；模型返回后立刻把残留增量刷出去，保证增量先于 assistant_message 落盘。
         self.stream_flush = None
+        # 取消令牌（任何有 is_set() 的对象）；为 None 表示不可取消。
+        self.cancel_token = None
         self._last_prefix_refresh = {
             "workspace_changed": False,
             "prefix_changed": False,
@@ -279,6 +285,11 @@ class Hepilot:
             session=session_store.load(session_id),
             **kwargs,
         )
+
+    def _cancelled(self):
+        """取消令牌是否已置位。没有令牌就永远不取消。"""
+        token = getattr(self, "cancel_token", None)
+        return bool(token is not None and token.is_set())
 
     def _ensure_session_shape(self):
         """补齐旧 session 缺失的关键字段，保持向后兼容。"""
@@ -1195,7 +1206,12 @@ class Hepilot:
         # 3. 行动：如果是工具调用，就执行工具
         # 4. 记录：把结果写回 history / task_state / trace / memory
         # 然后进入下一轮，直到停机条件满足
+        cancelled = False
         while tool_steps < self.max_steps and attempts < max_attempts:
+            # 取消检查放在最前面：用户按下停止后，不再发起新的模型调用。
+            if self._cancelled():
+                cancelled = True
+                break
             attempts += 1
             #单次状态机的调用模型请求次数+1,并且落盘记录
             task_state.record_attempt()
@@ -1300,12 +1316,18 @@ class Hepilot:
                     # None 是"新一轮模型调用开始"的哨兵，让前端切一条新的气泡。
                     self.stream_sink(None)
                     complete_kwargs["on_delta"] = self.stream_sink
+                if self.cancel_token is not None:
+                    complete_kwargs["cancel"] = self.cancel_token
                 raw = self.model_client.complete(
                     prompt,  # 完整的 prompt 文本
                     self.max_new_tokens,  # 模型最大输出 token 数
                     **complete_kwargs,
                 )
             except Exception as exc:
+                # 模型层因取消而抛错时，不要当成 model_error，走取消收口。
+                if self._cancelled():
+                    cancelled = True
+                    break
                 return self.finish_run_with_model_error(task_state, run_started_at, self.last_prompt_metadata, exc)
             # 模型已经吐完：先把缓冲里的增量落盘，
             # 否则最后一批 delta 会晚于 assistant_message，前端会多出一条重复气泡。
@@ -1372,6 +1394,17 @@ class Hepilot:
                     }
                 )
                 for index, tool_call in enumerate(tool_calls):
+                    # 已取消：本批剩余工具一律补 synthetic，然后退出主循环。
+                    if self._cancelled():
+                        self.record_synthetic_tool_results(
+                            task_state,
+                            tool_calls[index:],
+                            "cancelled by user before execution",
+                            batch_size=batch_size,
+                            start_index=index,
+                        )
+                        cancelled = True
+                        break
                     # 单轮多工具仍然受全局 step limit 限制；一旦本轮剩余预算耗尽，就给后续工具补 synthetic result，
                     # 明确告诉下一轮“这些工具没有被执行”，而不是静默丢失。
                     if tool_steps >= self.max_steps:
@@ -1439,6 +1472,8 @@ class Hepilot:
                             start_index=index + 1,
                         )
                         break
+                if cancelled:
+                    break
                 continue
 
             if kind == "retry":
@@ -1479,8 +1514,12 @@ class Hepilot:
             self.run_store.write_report(task_state, self.redact_artifact(self.build_report(task_state)))
             return final
 
-        # 走到这里说明主循环是因为达到某个上限而退出；如果是 attempts 先耗尽，表示模型多次输出格式不合规。
-        if attempts >= max_attempts and tool_steps < self.max_steps:
+        # 走到这里说明主循环已经退出。三条路：用户取消 / 重试耗尽 / 步数打满。
+        if cancelled:
+            final = "Cancelled by user."
+            task_state.stop_cancelled(final)
+            self.emit_trace(task_state, "run_cancelled", {"reason": "user_cancelled"})
+        elif attempts >= max_attempts and tool_steps < self.max_steps:
             final = "Stopped after too many malformed model responses without a valid tool call or final answer."
             task_state.stop_retry_limit(final)
         else:
@@ -1979,7 +2018,7 @@ class Hepilot:
         }
         self.session["resume_state"] = {}
         self.session["runtime_identity"] = self.current_runtime_identity()
-        self.memory = memorylib.LayeredMemory(self.session["memory"], workspace_root=self.root)
+        self.memory = memorylib.LayeredMemory(self.session["memory"], workspace_root=self.root, user_root=self.user_memory_root)
         # 事件日志是追加的，"清空"必须显式记一笔，否则重载会把历史回放回来。
         self.session_store.append_event(self.session, "session_reset", {})
         self.session_store.save(self.session)
