@@ -61,7 +61,8 @@ class AgentConfig:
     temperature: float = 0.2
     max_steps: int = 100
     max_attempts: int = 100
-    max_new_tokens: int = 2048
+    # 2048 太小：模型一次写多个 Go 文件（约 7k 字符）会撞上限被截断。
+    max_new_tokens: int = 8192
     approval_policy: str = "ask"
     secret_env_names: tuple = ()
 

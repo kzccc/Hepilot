@@ -1383,6 +1383,11 @@ class Hepilot:
                 "completion_metadata": completion_metadata,
                 "duration_ms": int((time.monotonic() - model_started_at) * 1000),
             }
+            # 输出被 max_new_tokens 截断时，模型其实没有"写错格式"，
+            # 这条 trace 用来把两者区分开。
+            if self.looks_truncated(raw):
+                parsed_trace_payload["output_truncated"] = True
+                parsed_trace_payload["raw_length"] = len(raw)
             if kind == "tool_batch":
                 parsed_trace_payload["tool_use_count"] = len(payload)
                 parsed_trace_payload["tool_uses"] = [
@@ -1873,6 +1878,10 @@ class Hepilot:
         if "<tool" in raw and ("<final>" not in raw or raw.find("<tool") < raw.find("<final>")):
             blocks = Hepilot.extract_tool_blocks(raw)
             if not blocks:
+                # 一个完整块都没有：如果是因为被截断，就明确告诉模型"你被长度截断了"，
+                # 而不是笼统地说"格式错误"——后者会让它重试同样的大批量输出。
+                if Hepilot.looks_truncated(raw):
+                    return "retry", Hepilot.retry_notice(None, truncated=True)
                 return "retry", Hepilot.retry_notice()
             tool_calls = []
             for block in blocks:
@@ -1904,13 +1913,33 @@ class Hepilot:
         return "retry", Hepilot.retry_notice("model returned an empty response")
 
     @staticmethod
-    def retry_notice(problem=None):
+    def looks_truncated(raw):
+        """判断输出是不是被输出长度上限截断了。
+
+        判据：`<tool` 开标签多于 `</tool>` 闭标签。
+        比"内容看起来不完整"可靠，也不依赖各 provider 的 finish_reason——
+        那玩意儿我们现在并没有记录。
+        """
+        text = str(raw)
+        return text.count("<tool") > text.count("</tool>")
+
+    @staticmethod
+    def retry_notice(problem=None, truncated=False):
         """生成统一的模型重试提示。"""
         prefix = "Runtime notice"
         if problem:
             prefix += f": {problem}"
+        elif truncated:
+            prefix += ": model output was cut off by the output length limit"
         else:
             prefix += ": model returned malformed tool output"
+        if truncated:
+            # 截断时最关键的是让它"少写一点"，否则它会原样重试同样的大批量输出。
+            return (
+                f"{prefix}. Your reply was cut off mid-<tool> block, so nothing ran. "
+                "Split the work: emit exactly ONE <tool> call per reply, and keep each file small. "
+                "Do not write several large files in a single answer."
+            )
         return (
             #"{prefix}。请回复一个有效的 <tool> 调用，或者一个非空的 <final> 答案。
             # 对于多行文件，建议使用 <tool name="write_file" path="file.py"><content>...</content></tool> 格式。"
@@ -1934,7 +1963,9 @@ class Hepilot:
                 break
             close_index = raw.find("</tool>", open_index)
             if close_index == -1:
-                return []
+                # 尾巴被截断了（多半是撞到 max_new_tokens）。
+                # 这里必须保留前面已经闭合的块：一次截断不该把整批合法调用全丢掉。
+                break
             close_index += len("</tool>")
             blocks.append(raw[open_index:close_index])
             start = close_index
