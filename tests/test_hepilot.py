@@ -1815,12 +1815,19 @@ def test_recent_transcript_entries_stay_richer_than_older_ones(tmp_path):
 
     agent.record({"role": "user", "content": old_text, "created_at": "2026-04-07T09:00:00+00:00"})
     agent.record({"role": "assistant", "content": old_text, "created_at": "2026-04-07T09:01:00+00:00"})
-    agent.record({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:02:00+00:00"})
-    agent.record({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:03:00+00:00"})
-    agent.record({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:04:00+00:00"})
-    agent.record({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:05:00+00:00"})
-    agent.record({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:06:00+00:00"})
-    agent.record({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:07:00+00:00"})
+    # 填充条数要超过 recent 窗口，否则 old_text 会被当成"近期"而保留完整内容。
+    from hepilot import context_manager as _cm
+
+    window = max(6, _cm.DEFAULT_SECTION_BUDGETS["history"] // 1200)
+    for offset in range(window + 1):
+        role = "user" if offset % 2 == 0 else "assistant"
+        agent.record(
+            {
+                "role": role,
+                "content": recent_text,
+                "created_at": f"2026-04-07T10:{offset:02d}:00+00:00",
+            }
+        )
 
     assert agent.ask("Check the transcript") == "Done."
 

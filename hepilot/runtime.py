@@ -52,6 +52,9 @@ FOREIGN_TOOL_CALL_PATTERN = re.compile(
 MAX_SNAPSHOT_FILES = 4000
 MAX_SNAPSHOT_FILE_BYTES = 4 * 1024 * 1024
 SNAPSHOT_TIME_BUDGET_SECONDS = 20.0
+# 同一个文件在同一轮里最多读几次。超过就说明模型在打转，
+# 而不是在"多读一点"——它的每轮重读都会把上一轮挤出上下文窗口。
+READ_REPEAT_LIMIT = 4
 #一般作为默认状态使用
 CHECKPOINT_NONE_STATUS = "no-checkpoint"
 #三种checkpoint的恢复状态
@@ -277,6 +280,9 @@ class Hepilot:
         self.current_task_state = None
         self.current_run_dir = None
         self.last_prompt_metadata = {}
+        # 按路径统计 read_file 次数；ask() 每轮开始时会重置，
+        # 这里先初始化，避免直接调 run_tool 的调用方碰到 AttributeError。
+        self._read_counts = {}
         self.last_completion_metadata = {}
         self.last_durable_promotions = []
         self.last_durable_rejections = []
@@ -1256,6 +1262,8 @@ class Hepilot:
         cancelled = False
         # 保留最后一次组装的完整 prompt：步数打满时要靠它再要一次纯文本总结。
         prompt = ""
+        # 同一条 run 内按路径统计 read_file 次数，用于识别"反复读同一个文件"的坏循环。
+        self._read_counts = {}
         while tool_steps < self.max_steps and attempts < max_attempts:
             # 取消检查放在最前面：用户按下停止后，不再发起新的模型调用。
             if self._cancelled():
@@ -1699,6 +1707,30 @@ class Hepilot:
             }
             self.record_process_note_for_tool(name, self._last_tool_result_metadata)
             return f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
+        # read_file 的坏循环是另一种形态：args 每轮都在微调（end=40 → 80 → 120），
+        # "最近两次完全相同"永远拦不住，于是模型把同一批文件读几十遍、每读一遍
+        # 就把上一遍挤出上下文窗口。这里按路径统计本轮读取次数。
+        if name == "read_file":
+            read_path = str(args.get("path", "")).strip()
+            seen_reads = self._read_counts.get(read_path, 0) + 1
+            self._read_counts[read_path] = seen_reads
+            if seen_reads > READ_REPEAT_LIMIT:
+                self._last_tool_result_metadata = {
+                    "tool_status": "rejected",
+                    "tool_error_code": "repeated_file_read",
+                    "security_event_type": "",
+                    "risk_level": "low",
+                    "read_only": True,
+                    "affected_paths": [],
+                    "workspace_changed": False,
+                    "diff_summary": [],
+                }
+                self.record_process_note_for_tool(name, self._last_tool_result_metadata)
+                return (
+                    f"error: {read_path} has already been read {seen_reads - 1} times in this run. "
+                    "Its content is earlier in the transcript. Stop re-reading it: "
+                    "use what you already have and move on (write the file, or answer)."
+                )
         # 如果这是高风险工具且审批没有通过，就在真正执行前拒绝它，并记录这次拒绝的审计元数据。
         if tool["risky"] and not self.approve(name, args):
             self._last_tool_result_metadata = {

@@ -136,6 +136,18 @@ def test_context_manager_preserves_current_request_when_over_budget(tmp_path):
     assert metadata["current_request"]["rendered_chars"] == len(request)
 
 
+def _history_window():
+    """当前 history section 的 recent 窗口大小。
+
+    这几个测试要验证的是"旧记录被折叠"的机制，
+    所以填充条数必须真的超过窗口——写死 6 的话，
+    预算一调高、窗口变大，工具记录就变成"近期"而不再折叠。
+    """
+    from hepilot import context_manager
+
+    return max(6, context_manager.DEFAULT_SECTION_BUDGETS["history"] // 1200)
+
+
 def test_context_manager_collapses_older_duplicate_reads_into_one_summary_line(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("alpha\nbeta\n", encoding="utf-8")
@@ -154,13 +166,13 @@ def test_context_manager_collapses_older_duplicate_reads_into_one_summary_line(t
             }
         )
 
-    for minute in range(2, 8):
-        role = "user" if minute % 2 == 0 else "assistant"
+    for offset in range(_history_window() + 1):
+        role = "user" if offset % 2 == 0 else "assistant"
         agent.record(
             {
                 "role": role,
-                "content": f"recent-{minute}",
-                "created_at": f"2026-04-07T09:0{minute}:00+00:00",
+                "content": f"recent-{offset}",
+                "created_at": f"2026-04-07T09:{offset:02d}:00+00:00",
             }
         )
 
@@ -186,13 +198,13 @@ def test_context_manager_summarizes_older_tool_output_into_one_line(tmp_path):
         }
     )
 
-    for minute in range(1, 7):
-        role = "user" if minute % 2 == 1 else "assistant"
+    for offset in range(_history_window() + 1):
+        role = "user" if offset % 2 == 1 else "assistant"
         agent.record(
             {
                 "role": role,
-                "content": f"recent-{minute}",
-                "created_at": f"2026-04-07T09:0{minute}:00+00:00",
+                "content": f"recent-{offset}",
+                "created_at": f"2026-04-07T09:{offset:02d}:00+00:00",
             }
         )
 

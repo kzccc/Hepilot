@@ -10,12 +10,12 @@ import json
 from dataclasses import dataclass
 
 
-DEFAULT_TOTAL_BUDGET = 20000
+DEFAULT_TOTAL_BUDGET = 28000
 DEFAULT_SECTION_BUDGETS = {
     "prefix": 6000,
     "memory": 2400,
     "relevant_memory": 1600,
-    "history": 9000,
+    "history": 16000,
 }
 DEFAULT_SECTION_FLOORS = {
     "prefix": 2000,
@@ -377,10 +377,19 @@ class ContextManager:
             )
 
         # 优先保留最近的历史，因为下一步决策通常最依赖刚刚发生的工具结果。
-        recent_window = 6
+        #
+        # 这两个值原本写死成 recent_window=6 / line_limit=900，
+        # 结果是：模型一轮读 7 个文件，永远有一个在窗口外被折叠；
+        # 而 900 字符装不下一个 120 行的 Go 文件，于是它不停换 start/end 重读，
+        # 每读一轮就把上一轮挤出窗口 —— 表现就是"一直在读文件"。
+        # 现在改成按预算推导：窗口容纳得下多少条，就给每条多少字符。
+        recent_window = max(6, budget // 1200)
         recent_start = max(0, len(history) - recent_window)
+        recent_line_limit = max(900, min(3000, budget // max(1, recent_window)))
         #传入历史记录的str和recent_start的index,返回一个压缩过的历史记录列表和一些统计信息
-        history_entries, history_details = self._compressed_history_entries(history, recent_start)
+        history_entries, history_details = self._compressed_history_entries(
+            history, recent_start, recent_line_limit
+        )
         rendered_entries = []
         for entry in reversed(history_entries):
             # 将刚才取回来的处理好 recent 窗口的历史记录先反转，让最近的在前面。
@@ -445,7 +454,7 @@ class ContextManager:
             },
         )
 
-    def _compressed_history_entries(self, history, recent_start):
+    def _compressed_history_entries(self, history, recent_start, recent_line_limit=900):
         """把旧历史压成摘要，把近期历史保留为更完整的记录。"""
         entries = []  # 收集最终保留下来、准备渲染进 history section 的历史条目
         seen_older_reads = set()  # 记录已经处理过的旧 read_file 路径，用来折叠重复读取
@@ -461,8 +470,8 @@ class ContextManager:
             recent = index >= recent_start
             #如果这是一条有效的历史记录
             if recent:
-                #这行的限制为900
-                line_limit = 900
+                #单条近期记录的字符上限由预算推导，见 _render_history_section
+                line_limit = recent_line_limit
                 entries.append(
                     {
                         "recent": True,
@@ -475,11 +484,13 @@ class ContextManager:
             if item["role"] == "tool" and item["name"] == "read_file":
                 #将read_file工具调用的路径作为标识,
                 path = str(item["args"].get("path", "")).strip()
-                #如果之前已经处理过同样路径的read_file调用了,就认为这是重复读取,直接跳过不加入entries了
-                if path in seen_older_reads:
+                # 去重键必须带上行区间：同一个文件的 1-40 和 27-120 是两段不同内容，
+                # 只按路径去重会让后一段悄悄顶掉前一段，模型就永远看不全。
+                read_key = f"{path}|{item['args'].get('start', '')}|{item['args'].get('end', '')}"
+                if read_key in seen_older_reads:
                     details["collapsed_duplicate_reads"] += 1
                     continue
-                seen_older_reads.add(path)
+                seen_older_reads.add(read_key)
                 #这个函数会去state将path对应的文件摘要拿出来
                 summary = self._reusable_file_summary(path)
                 if summary:
