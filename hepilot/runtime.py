@@ -35,6 +35,19 @@ DEFAULT_FEATURE_FLAGS = {
 }
 # checkpoint 的格式版本
 CHECKPOINT_SCHEMA_VERSION = "phase1-v1"
+
+# 模型偶尔会退回自己在训练时见过的原生函数调用方言
+# （DeepSeek 的 <｜｜DSML｜｜...>、Anthropic 的 <antml:invoke>、
+# 通用的 <function_calls> / <invoke name=）。这些都不是本项目的协议，
+# 但明显是在"要调工具"，绝不能当成最终回答回给用户。
+FOREIGN_TOOL_CALL_PATTERN = re.compile(
+    r"</?\s*[｜|]{0,2}\s*DSML"
+    r"|<antml:"
+    r"|<function_calls\s*>"
+    r"|<invoke\s+name\s*="
+    r"|<tool_call\s*>",
+    re.IGNORECASE,
+)
 # 工作区快照的硬上限：防止把盘符根当成工作区时把 run 卡死。
 MAX_SNAPSHOT_FILES = 4000
 MAX_SNAPSHOT_FILE_BYTES = 4 * 1024 * 1024
@@ -527,6 +540,9 @@ class Hepilot:
               <tool name="write_file" path="file.py"><content>...</content></tool>
             - Final answers must look like:
               <final>your answer</final>
+            - Do not use any other tool-call syntax. Native function-call markup
+              (<|DSML|>, <antml:invoke>, <function_calls>, <tool_call>) is not
+              executable here and will be discarded.
             - Never invent tool results.
             - Keep answers concise and concrete.
             - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
@@ -1903,11 +1919,19 @@ class Hepilot:
         if "<final>" in raw:
             final = Hepilot.extract(raw, "final").strip()
             if final:
+                # <final> 里裹着别家的函数调用同样不算答案。
+                if Hepilot.looks_like_foreign_tool_call(final):
+                    return "retry", Hepilot.retry_notice(None, foreign=True)
                 return "final", final
             return "retry", Hepilot.retry_notice("model returned an empty <final> answer")
         #如果前面的 <tool> / <final> 解析都没命中，那就把模型原始输出当成普通最终答案处理；
         raw = raw.strip()
         if raw:
+            # 但"裸文本就是答案"的前提是它确实是自然语言。
+            # 模型有时会输出别家的原生工具调用方言，那种东西必须打回去重做，
+            # 否则用户会收到一段 <｜｜DSML｜｜ invoke ...> 的乱码当成回答。
+            if Hepilot.looks_like_foreign_tool_call(raw):
+                return "retry", Hepilot.retry_notice(None, foreign=True)
             return "final", raw
         #但如果连这个答案都是空的，就要求模型重试。
         return "retry", Hepilot.retry_notice("model returned an empty response")
@@ -1924,13 +1948,20 @@ class Hepilot:
         return text.count("<tool") > text.count("</tool>")
 
     @staticmethod
-    def retry_notice(problem=None, truncated=False):
+    def looks_like_foreign_tool_call(raw):
+        """判断输出是不是别家的原生函数调用方言。"""
+        return bool(FOREIGN_TOOL_CALL_PATTERN.search(str(raw)))
+
+    @staticmethod
+    def retry_notice(problem=None, truncated=False, foreign=False):
         """生成统一的模型重试提示。"""
         prefix = "Runtime notice"
         if problem:
             prefix += f": {problem}"
         elif truncated:
             prefix += ": model output was cut off by the output length limit"
+        elif foreign:
+            prefix += ": model used a foreign tool-call dialect"
         else:
             prefix += ": model returned malformed tool output"
         if truncated:
@@ -1939,6 +1970,14 @@ class Hepilot:
                 f"{prefix}. Your reply was cut off mid-<tool> block, so nothing ran. "
                 "Split the work: emit exactly ONE <tool> call per reply, and keep each file small. "
                 "Do not write several large files in a single answer."
+            )
+        if foreign:
+            return (
+                f"{prefix}. This runtime only understands its own tool syntax. "
+                'Use <tool>{"name": "<tool_name>", "args": {...}}</tool> '
+                'or <tool name="write_file" path="a.go"><content>...</content></tool>. '
+                "Do not emit <|DSML|>, <antml:>, <function_calls> or any other native "
+                "function-call markup — it is not executable here and will be discarded."
             )
         return (
             #"{prefix}。请回复一个有效的 <tool> 调用，或者一个非空的 <final> 答案。
