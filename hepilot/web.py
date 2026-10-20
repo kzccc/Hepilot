@@ -55,6 +55,7 @@ class AgentConfig:
     model: str = ""
     base_url: str = ""
     api_key: str = ""
+    api_style: str = ""
     temperature: float = 0.2
     max_steps: int = 20
     max_new_tokens: int = 2048
@@ -95,6 +96,7 @@ def build_model_client(config):
         or str(provider_config.get("api_key", "")).strip(),
         temperature=config.temperature,
         timeout=300,
+        api_style=config.api_style or None,
     )
 
 
@@ -123,6 +125,66 @@ class SessionHandle:
         self.running = False
         self.pending = {}
         self.agent.approval_handler = self._approval_handler
+        # 流式输出：模型每吐一块文本，就落一条 assistant_delta 事件。
+        self.agent.stream_sink = self._on_delta
+        self.agent.stream_flush = self._flush_delta
+        self._delta_buf = []
+        self._delta_text = ""
+        self._delta_started = False
+        self._delta_flushed_at = 0.0
+
+    # ---- 流式 ----
+
+    def _run_id(self):
+        task_state = getattr(self.agent, "current_task_state", None)
+        return getattr(task_state, "run_id", "") or ""
+
+    @staticmethod
+    def _stream_kind(text):
+        """从已累积的文本判断这一轮模型在产出什么。"""
+        tool_at = text.find("<tool")
+        final_at = text.find("<final>")
+        if tool_at != -1 and (final_at == -1 or tool_at < final_at):
+            return "tool"
+        if final_at != -1:
+            return "final"
+        return "text"
+
+    def _reset_delta(self):
+        self._delta_buf = []
+        self._delta_text = ""
+        self._delta_started = False
+
+    def _on_delta(self, chunk):
+        """模型层的增量回调。chunk 为 None 表示“新一轮调用开始”。"""
+        if chunk is None:
+            self._reset_delta()
+            self._emit("assistant_start", {})
+            self._delta_started = True
+            return
+        if not chunk:
+            return
+        self._delta_buf.append(chunk)
+        self._delta_text += chunk
+        now = time.time()
+        # 合并小块：太频繁的落盘会让 events.jsonl 爆炸。
+        if now - self._delta_flushed_at >= 0.05 or len("".join(self._delta_buf)) >= 160 or "\n" in chunk:
+            self._flush_delta()
+
+    def _flush_delta(self):
+        if not self._delta_buf:
+            return
+        text = "".join(self._delta_buf)
+        self._delta_buf = []
+        self._delta_flushed_at = time.time()
+        self._emit("assistant_delta", {"text": text, "kind": self._stream_kind(self._delta_text)})
+
+    def _emit(self, event_type, data):
+        try:
+            self.agent.session_store.append_event(self.agent.session, event_type, data, run_id=self._run_id())
+        except Exception:
+            # 流式落盘失败不该拖垮这一轮。
+            pass
 
     # 审批：写一条事件告诉前端，然后阻塞等待裁决
     def _approval_handler(self, name, args):
@@ -239,6 +301,7 @@ class SessionManager:
         if handle.running:
             raise RuntimeError("session is busy")
         handle.running = True
+        handle._reset_delta()
         self.store.update_header(session_id, status="running")
 
         def worker():
@@ -251,6 +314,10 @@ class SessionManager:
                     {"error_type": exc.__class__.__name__, "error_message": str(exc)},
                 )
             finally:
+                try:
+                    handle._flush_delta()
+                except Exception:
+                    pass
                 try:
                     self.store.write_snapshot(handle.agent.session)
                 finally:
@@ -281,8 +348,13 @@ def transcript_from_events(events):
                     "seq": seq,
                     "text": data.get("text", ""),
                     "toolUses": data.get("tool_uses") or [],
+                    "msgKind": data.get("kind", ""),
                 }
             )
+        elif kind == "assistant_delta":
+            items.append({"kind": "delta", "seq": seq, "text": data.get("text", ""), "streamKind": data.get("kind", "text")})
+        elif kind == "assistant_start":
+            items.append({"kind": "assistant_start", "seq": seq})
         elif kind == "tool_executed":
             items.append(
                 {
@@ -540,6 +612,7 @@ def main(argv=None):
     parser.add_argument("--model", default="")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--api-key", default="")
+    parser.add_argument("--api-style", default="", choices=("", "responses", "chat"), help="openai 兼容接口风格；留空按 base_url 自动判断")
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--max-new-tokens", type=int, default=2048)
@@ -551,6 +624,7 @@ def main(argv=None):
         model=args.model,
         base_url=args.base_url,
         api_key=args.api_key,
+        api_style=args.api_style,
         temperature=args.temperature,
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,

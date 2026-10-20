@@ -48,9 +48,11 @@ class OllamaModelClient:
         self.supports_prompt_cache = False
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, **kwargs):
+    def complete(self, prompt, max_new_tokens, on_delta=None, **kwargs):
         # Ollama 当前不支持我们这里接入的 prompt cache 语义，
         # 所以 runtime 传下来的缓存参数会被忽略。
+        if on_delta is not None:
+            return self._complete_stream(prompt, max_new_tokens, on_delta)
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
@@ -87,6 +89,58 @@ class OllamaModelClient:
         if data.get("error"):
             raise RuntimeError(f"Ollama error: {data['error']}")
         return data.get("response", "")
+
+    def _complete_stream(self, prompt, max_new_tokens, on_delta):
+        """Ollama 的流式是 NDJSON：一行一个 JSON，`response` 是文本增量。"""
+        self.last_completion_metadata = {}
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": True,
+            "raw": False,
+            "think": False,
+            "options": {
+                "num_predict": max_new_tokens,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+            },
+        }
+        request = urllib.request.Request(
+            self.host + "/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        pieces = []
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("error"):
+                        raise RuntimeError(f"Ollama error: {event['error']}")
+                    piece = event.get("response") or ""
+                    if piece:
+                        pieces.append(piece)
+                        on_delta(piece)
+                    if event.get("done"):
+                        break
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Ollama request failed with HTTP {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                "Could not reach Ollama.\n"
+                "Make sure `ollama serve` is running and the model is available.\n"
+                f"Host: {self.host}\n"
+                f"Model: {self.model}"
+            ) from exc
+        return "".join(pieces)
 
 
 def _normalize_versioned_base_url(base_url):
@@ -201,22 +255,201 @@ def _extract_usage_cache_details(data):
     }
 
 
-class OpenAICompatibleModelClient:
-    """兼容 OpenAI `/responses` 接口的模型客户端。"""
+def _detect_api_style(base_url, api_style=None):
+    """决定走 `/responses` 还是 `/chat/completions`。
 
-    def __init__(self, model, base_url, api_key, temperature, timeout):
+    显式指定优先；否则按 base_url 猜：
+    - openai.com / right.codes：它们提供 Responses API
+    - deepseek 以及大多数兼容服务：只提供 Chat Completions
+    猜错也不致命，调用方可以显式覆盖。
+    """
+    style = str(api_style or "").strip().lower()
+    if style in {"responses", "chat"}:
+        return style
+    lowered = str(base_url).lower()
+    if "openai.com" in lowered or "right.codes" in lowered:
+        return "responses"
+    return "chat"
+
+
+class OpenAICompatibleModelClient:
+    """兼容 OpenAI `/responses` 与 `/chat/completions` 的模型客户端。"""
+
+    def __init__(self, model, base_url, api_key, temperature, timeout, api_style=None):
         self.model = model
         self.base_url = _normalize_versioned_base_url(base_url)
         self.api_key = api_key
         self.temperature = temperature
         self.timeout = timeout
+        self.api_style = _detect_api_style(self.base_url, api_style)
         # 当前只在明确支持 prompt cache 语义的后端上启用这条链路，
         # 避免对不支持的后端传一个“看起来统一、其实没意义”的伪参数。
         #判断模型后端的 base_url 是否包含 "openai.com" 或 "right.codes"，只有这两个后端支持 OpenAI Responses API 的 prompt cache 协议。
-        self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
+        self.supports_prompt_cache = self.api_style == "responses" and any(
+            host in self.base_url for host in ("openai.com", "right.codes")
+        )
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
+    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None):
+        """按探测到的接口风格发起一次调用，可选地流式回吐文本增量。"""
+        if self.api_style == "chat":
+            return self._complete_chat(prompt, max_new_tokens, on_delta)
+        return self._complete_responses(prompt, max_new_tokens, prompt_cache_key, prompt_cache_retention, on_delta)
+
+    def _complete_chat(self, prompt, max_new_tokens, on_delta=None):
+        """`/chat/completions` 路径：DeepSeek 等只提供这个接口的后端走这里。"""
+        self.last_completion_metadata = {}
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_new_tokens,
+            "stream": bool(on_delta is not None),
+        }
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        request = urllib.request.Request(
+            self.base_url + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+
+        attempts = 3
+        for attempt in range(attempts):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    body_text = response.read().decode("utf-8", errors="replace")
+                    content_type = (getattr(response, "headers", {}) or {}).get("Content-Type", "")
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                if exc.code >= 500 and attempt < attempts - 1:
+                    time.sleep(_retry_delay_seconds(attempt))
+                    continue
+                raise RuntimeError(f"OpenAI-compatible request failed with HTTP {exc.code}: {body}") from exc
+            except (urllib.error.URLError, RemoteDisconnected) as exc:
+                if attempt < attempts - 1:
+                    time.sleep(_retry_delay_seconds(attempt))
+                    continue
+                raise RuntimeError(
+                    "Could not reach the OpenAI-compatible backend.\n"
+                    f"Base URL: {self.base_url}\n"
+                    f"Model: {self.model}"
+                ) from exc
+
+            if payload["stream"] or content_type.startswith("text/event-stream") or body_text.lstrip().startswith("data:"):
+                text = self._consume_chat_stream(body_text, on_delta)
+                if text:
+                    return text
+                if attempt < attempts - 1:
+                    time.sleep(_retry_delay_seconds(attempt))
+                    continue
+                raise RuntimeError("OpenAI-compatible error: could not extract text from event stream response")
+
+            try:
+                data = json.loads(body_text)
+            except json.JSONDecodeError as exc:
+                if attempt < attempts - 1:
+                    time.sleep(_retry_delay_seconds(attempt))
+                    continue
+                raise RuntimeError(
+                    "OpenAI-compatible error: backend returned non-JSON content that could not be parsed"
+                ) from exc
+            if data.get("error"):
+                raise RuntimeError(f"OpenAI-compatible error: {data['error']}")
+            usage = _extract_usage_cache_details(data)
+            self.last_completion_metadata = {
+                "prompt_cache_supported": False,
+                "prompt_cache_key": None,
+                "prompt_cache_retention": None,
+                **usage,
+            }
+            text = _extract_openai_text(data)
+            if text:
+                return text
+            if attempt < attempts - 1:
+                time.sleep(_retry_delay_seconds(attempt))
+                continue
+            raise RuntimeError("OpenAI-compatible error: could not extract text from response")
+
+    def _complete_responses_stream(self, prompt, max_new_tokens, prompt_cache_key, prompt_cache_retention, on_delta):
+        """`/responses` 的流式实现：逐行读 SSE，遇到文本增量就回调。"""
+        self.last_completion_metadata = {}
+        payload = {
+            "model": self.model,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+            "max_output_tokens": max_new_tokens,
+            "stream": True,
+        }
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.supports_prompt_cache and prompt_cache_key:
+            payload["prompt_cache_key"] = prompt_cache_key
+        if self.supports_prompt_cache and prompt_cache_retention:
+            payload["prompt_cache_retention"] = prompt_cache_retention
+
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        request = urllib.request.Request(
+            self.base_url + "/responses",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+
+        pieces = []
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                chunk = line[len("data:"):].strip()
+                if not chunk or chunk == "[DONE]":
+                    continue
+                try:
+                    event = json.loads(chunk)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("error"):
+                    raise RuntimeError(f"OpenAI-compatible error: {event['error']}")
+                if event.get("type") == "response.output_text.delta":
+                    delta = event.get("delta")
+                    if isinstance(delta, str) and delta:
+                        pieces.append(delta)
+                        on_delta(delta)
+        return "".join(pieces)
+
+    def _consume_chat_stream(self, body_text, on_delta):
+        """解析 chat/completions 的 SSE 流，逐块回调并拼接全文。"""
+        pieces = []
+        for line in body_text.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if event.get("error"):
+                raise RuntimeError(f"OpenAI-compatible error: {event['error']}")
+            for choice in event.get("choices") or []:
+                delta = (choice.get("delta") or {}).get("content")
+                if isinstance(delta, str) and delta:
+                    pieces.append(delta)
+                    if on_delta is not None:
+                        on_delta(delta)
+        return "".join(pieces)
+
+    def _complete_responses(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None):
         """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
 
         为什么存在：
@@ -233,6 +466,11 @@ class OpenAICompatibleModelClient:
         它位于 `Hepilot.ask()` 的模型调用阶段，是稳定前缀缓存复用链路真正
         落到 provider API 的地方。
         """
+        # 流式走独立实现：它必须边读边回调，不能等 read() 一次性读完。
+        if on_delta is not None:
+            return self._complete_responses_stream(
+                prompt, max_new_tokens, prompt_cache_key, prompt_cache_retention, on_delta
+            )
         #每次回答前先将上一次回答细节清空,准备这次存入
         self.last_completion_metadata = {}
         #构建payload数据负载,规定格式
@@ -374,11 +612,13 @@ class AnthropicCompatibleModelClient:
         self.supports_prompt_cache = False
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
-        """向 Anthropic-compatible 后端发起一次完整文本请求。"""
+    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None):
+        """向 Anthropic-compatible 后端发起一次文本请求，可选流式。"""
         # 为了保持统一接口，runtime 仍然会传缓存参数进来；
         # 这里只是显式丢弃，因为当前 Anthropic-compatible 路径没有接缓存复用。
         del prompt_cache_key, prompt_cache_retention
+        if on_delta is not None:
+            return self._complete_stream(prompt, max_new_tokens, on_delta)
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
@@ -451,3 +691,51 @@ class AnthropicCompatibleModelClient:
                 time.sleep(_retry_delay_seconds(attempt))
                 continue
             raise RuntimeError("Anthropic-compatible error: could not extract text from response")
+
+    def _complete_stream(self, prompt, max_new_tokens, on_delta):
+        """Anthropic 流式：SSE 的 `content_block_delta` 里带 `text_delta`。"""
+        self.last_completion_metadata = {}
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+            "max_tokens": max_new_tokens,
+            "stream": True,
+        }
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "Accept": "text/event-stream",
+        }
+        request = urllib.request.Request(
+            self.base_url + "/messages",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        pieces = []
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                chunk = line[len("data:"):].strip()
+                if not chunk or chunk == "[DONE]":
+                    continue
+                try:
+                    event = json.loads(chunk)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == "error":
+                    raise RuntimeError(f"Anthropic-compatible error: {event.get('error')}")
+                if event.get("type") == "content_block_delta":
+                    delta = event.get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text")
+                        if isinstance(text, str) and text:
+                            pieces.append(text)
+                            on_delta(text)
+        return "".join(pieces)

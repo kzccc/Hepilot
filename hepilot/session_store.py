@@ -365,6 +365,8 @@ def event_to_history_item(event):
         item = {"role": "assistant", "content": str(data.get("text", "")), "created_at": created_at}
         if data.get("tool_uses"):
             item["tool_uses"] = data["tool_uses"]
+        if data.get("kind"):
+            item["kind"] = data["kind"]
         return item
     if kind == "tool_executed":
         item = {

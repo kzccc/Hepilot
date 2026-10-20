@@ -153,6 +153,9 @@ def history_item_to_event(item):
         data = {"text": str(item.get("content", ""))}
         if item.get("tool_uses"):
             data["tool_uses"] = item["tool_uses"]
+        # kind 让前端知道这条回复是"要调工具""直接回答"还是"格式重问"。
+        if item.get("kind"):
+            data["kind"] = str(item["kind"])
         return "assistant_message", data
     if role == "tool":
         data = {
@@ -257,6 +260,10 @@ class Hepilot:
         self._last_tool_result_metadata = {}
         # 由前端注入；为 None 时 approve() 退回 stdin。
         self.approval_handler = None
+        # 由前端注入；非 None 时模型调用走流式，逐块回吐文本。
+        self.stream_sink = None
+        # 由前端注入；模型返回后立刻把残留增量刷出去，保证增量先于 assistant_message 落盘。
+        self.stream_flush = None
         self._last_prefix_refresh = {
             "workspace_changed": False,
             "prefix_changed": False,
@@ -1283,14 +1290,27 @@ class Hepilot:
             try:
                 # 这里是 runtime 和 provider 的真正边界；
                 # 一旦模型层把错误抛上来，就在 ask() 内部把它收口成 model_error。
+                complete_kwargs = {
+                    "prompt_cache_key": prompt_cache_key,
+                    "prompt_cache_retention": prompt_cache_retention,
+                }
+                # 只有前端明确要流式时才传 on_delta；不传就保持一次性返回，
+                # 这样既有测试里的极简 client（不接受该参数）不会被破坏。
+                if self.stream_sink is not None:
+                    # None 是"新一轮模型调用开始"的哨兵，让前端切一条新的气泡。
+                    self.stream_sink(None)
+                    complete_kwargs["on_delta"] = self.stream_sink
                 raw = self.model_client.complete(
                     prompt,  # 完整的 prompt 文本
                     self.max_new_tokens,  # 模型最大输出 token 数
-                    prompt_cache_key=prompt_cache_key,  # 稳定前缀的 sha256，用于缓存命中
-                    prompt_cache_retention=prompt_cache_retention,  # 缓存保留策略
+                    **complete_kwargs,
                 )
             except Exception as exc:
                 return self.finish_run_with_model_error(task_state, run_started_at, self.last_prompt_metadata, exc)
+            # 模型已经吐完：先把缓冲里的增量落盘，
+            # 否则最后一批 delta 会晚于 assistant_message，前端会多出一条重复气泡。
+            if self.stream_flush is not None:
+                self.stream_flush()
             #记录complete的结果的元数据记录进Hepilot实例的last_completion_metadata属性里,以供后续使用,方便统一写入 report 和 trace。
             #同时也将prompt_metadata更新,赋值给Hepilot实例的self.last_prompt_metadata
             completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
@@ -1338,6 +1358,7 @@ class Hepilot:
                 self.record(
                     {
                         "role": "assistant",
+                        "kind": "tool",
                         "content": raw,
                         "tool_uses": [
                             {
@@ -1422,12 +1443,12 @@ class Hepilot:
 
             if kind == "retry":
                 #如果是重试,记录进history,落盘状态机,并且继续下一轮循环
-                self.record({"role": "assistant", "content": payload, "created_at": now()})
+                self.record({"role": "assistant", "kind": "retry", "content": payload, "created_at": now()})
                 continue
 
             #如果走到这条分支,就说明模型已经给出了最终的答案
             final = (payload or raw).strip()
-            self.record({"role": "assistant", "content": final, "created_at": now()})
+            self.record({"role": "assistant", "kind": "final", "content": final, "created_at": now()})
             #更新状态机为最新的状态
             task_state.finish_success(final)
             # 尝试把这轮问答里长期有价值、值得跨会话保留的信息提升到 durable memory。
@@ -1467,7 +1488,7 @@ class Hepilot:
             final = "Stopped after reaching the step limit without a final answer."
             task_state.stop_step_limit(final)
         #记录history
-        self.record({"role": "assistant", "content": final, "created_at": now()})
+        self.record({"role": "assistant", "kind": "stopped", "content": final, "created_at": now()})
         #记录持久化记忆
         self.promote_durable_memory(user_message, final)
         #创建一个checkpoint,记录运行被迫停止的状态,以供后续恢复使用

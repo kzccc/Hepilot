@@ -123,6 +123,20 @@
   .toggle { margin-left: auto; color: var(--faint); font-size: 11px; user-select: none; }
   .card-head { cursor: pointer; }
 
+  .kbadge {
+    display: inline-block; font-family: var(--mono); font-size: 10px;
+    padding: 1px 7px; border-radius: 4px; margin-bottom: 4px;
+    border: 1px solid transparent;
+  }
+  .kbadge.muted { color: var(--faint); border-color: var(--border); }
+  .kbadge.ok { color: var(--ok); border-color: rgba(63,185,80,.45); }
+  .kbadge.warn { color: var(--warn); border-color: rgba(210,153,34,.45); }
+  .text.streaming::after {
+    content: "▍"; color: var(--accent); margin-left: 1px;
+    animation: blink 1s steps(2, start) infinite;
+  }
+  @keyframes blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+
   .cp { display: flex; align-items: center; gap: 8px; color: var(--faint); font-family: var(--mono); font-size: 11px; margin: 10px 0; }
   .cp::before { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
   .cp::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
@@ -243,7 +257,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const state = { sessions: [], current: null, lastSeq: 0, es: null, busy: false };
+const state = { sessions: [], current: null, lastSeq: 0, es: null, busy: false, live: null };
 
 function fmtTime(iso) {
   if (!iso) return "";
@@ -313,6 +327,7 @@ async function openSession(id) {
   $("hint").textContent = "Enter 发送 · Shift+Enter 换行";
   const stream = $("stream");
   stream.innerHTML = '<div class="wrap" id="wrap"></div>';
+  state.live = null;
   for (const item of data.transcript || []) renderItem(item, false);
   scrollBottom();
   openStream(id, state.lastSeq);
@@ -346,7 +361,9 @@ function transcriptItem(event) {
   const d = event.data || {};
   switch (event.type) {
     case "user_message": return { kind: "user", text: d.text };
-    case "assistant_message": return { kind: "assistant", text: d.text, toolUses: d.tool_uses || [] };
+    case "assistant_message": return { kind: "assistant", text: d.text, toolUses: d.tool_uses || [], msgKind: d.kind || "" };
+    case "assistant_start": return { kind: "assistant_start" };
+    case "assistant_delta": return { kind: "delta", text: d.text || "", streamKind: d.kind || "text" };
     case "tool_executed": return { kind: "tool", name: d.name, args: d.args, result: d.result, synthetic: d.synthetic };
     case "run_started": return { kind: "run_start" };
     case "run_finished": return { kind: "run_end", status: d.status, stopReason: d.stop_reason, final: d.final_answer };
@@ -364,22 +381,82 @@ function escapeHtml(text) {
   return String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+function createAssistantBubble() {
+  const wrap = $("wrap");
+  const el = document.createElement("div");
+  el.className = "msg assistant";
+  el.innerHTML =
+    '<div class="role">hepilot</div><div class="body">' +
+    '<div><span class="kbadge muted" data-badge>…</span></div>' +
+    '<div class="text" data-text></div>' +
+    '<div data-calls></div></div>';
+  if (wrap) wrap.appendChild(el);
+  const textEl = el.querySelector("[data-text]");
+  const badgeEl = el.querySelector("[data-badge]");
+  const callsEl = el.querySelector("[data-calls]");
+  const LABELS = {
+    text: ["推理中", "muted"],
+    tool: ["准备调用工具", "warn"],
+    final: ["回答", "ok"],
+    retry: ["格式重试", "warn"],
+    stopped: ["已停止", "muted"],
+  };
+  return {
+    el,
+    text: "",
+    calls: [],
+    paint(kind) {
+      const [label, cls] = LABELS[kind] || LABELS.text;
+      badgeEl.className = "kbadge " + cls;
+      badgeEl.textContent = label;
+      textEl.textContent = this.text;
+      textEl.classList.toggle("streaming", kind === "text");
+    },
+    paintCalls() {
+      callsEl.innerHTML = "";
+      for (const t of this.calls || []) {
+        const card = document.createElement("div");
+        card.className = "card";
+        card.innerHTML = `<div class="card-body"><pre>→ ${escapeHtml(t.name)} ${escapeHtml(compactArgs(t.args))}</pre></div>`;
+        callsEl.appendChild(card);
+      }
+    },
+  };
+}
+
 function renderItem(item, live) {
   const wrap = $("wrap");
   if (!wrap || !item) return;
   const el = document.createElement("div");
 
+  /* ---- 流式：开始 / 增量 / 收口 ---- */
+  if (item.kind === "assistant_start") {
+    state.live = createAssistantBubble();
+    return;
+  }
+  if (item.kind === "delta") {
+    if (!state.live) state.live = createAssistantBubble();
+    state.live.text += item.text || "";
+    state.live.paint(item.streamKind);
+    if (live) scrollBottom();
+    return;
+  }
+
   if (item.kind === "user" || item.kind === "assistant") {
-    el.className = `msg ${item.kind}`;
-    const label = item.kind === "user" ? "user" : "hepilot";
-    let extra = "";
-    if (item.toolUses && item.toolUses.length) {
-      extra = `<div class="card"><div class="card-body"><pre>${escapeHtml(
-        item.toolUses.map((t) => `→ ${t.name} ${compactArgs(t.args)}`).join("\n")
-      )}</pre></div></div>`;
+    if (item.kind === "assistant") {
+      // 有流式气泡就收口到它上面，避免出现两条重复的回复。
+      const bubble = state.live || createAssistantBubble();
+      bubble.text = item.text || "";
+      bubble.paint(item.msgKind || (item.toolUses && item.toolUses.length ? "tool" : "final"));
+      bubble.calls = item.toolUses || [];
+      bubble.paintCalls();
+      state.live = null;
+      if (live) scrollBottom();
+      return;
     }
-    el.innerHTML = `<div class="role">${label}</div><div class="body"><div class="text">${escapeHtml(item.text || "")}</div>${extra}</div>`;
-    if (!String(item.text || "").trim() && !extra) return;
+    el.className = "msg user";
+    el.innerHTML = `<div class="role">user</div><div class="body"><div class="text">${escapeHtml(item.text || "")}</div></div>`;
+    if (!String(item.text || "").trim()) return;
   } else if (item.kind === "tool") {
     el.className = "card collapsed";
     el.innerHTML =
