@@ -28,6 +28,20 @@ from .workspace import WorkspaceContext
 
 ASSETS_DIR = Path(__file__).parent / "web_assets"
 APPROVAL_TIMEOUT_SECONDS = 300
+GLOBAL_CONFIG_PATH = Path.home() / ".hepilot" / "config.json"
+
+
+def _provider_config(provider):
+    """读取 ~/.hepilot/config.json 里某个 provider 的默认项。
+
+    和 CLI 保持同一套回落顺序：命令行 > 环境变量 > 全局配置 > 代码默认值。
+    """
+    try:
+        payload = json.loads(GLOBAL_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    providers = dict(payload.get("providers", {}) or {})
+    return dict(providers.get(str(provider), {}) or {})
 
 
 # --------------------------------------------------------------------- 配置
@@ -49,8 +63,9 @@ class AgentConfig:
 
 
 def build_model_client(config):
-    """按 provider 构造模型 client，行为与 CLI 保持一致。"""
+    """按 provider 构造模型 client，回落顺序与 CLI 一致。"""
     provider = (config.provider or "openai").lower()
+    provider_config = _provider_config(provider)
     if provider == "ollama":
         return OllamaModelClient(
             model=config.model or "qwen3.5:4b",
@@ -62,15 +77,22 @@ def build_model_client(config):
     if provider == "anthropic":
         return AnthropicCompatibleModelClient(
             model=config.model or "claude-sonnet-4-6",
-            base_url=config.base_url or "https://www.right.codes/claude/v1",
-            api_key=config.api_key or os.environ.get("ANTHROPIC_API_KEY", ""),
+            base_url=config.base_url or str(provider_config.get("base_url", "")).strip() or "https://www.right.codes/claude/v1",
+            api_key=config.api_key
+            or os.environ.get("ANTHROPIC_API_KEY", "")
+            or str(provider_config.get("api_key", "")).strip(),
             temperature=config.temperature,
             timeout=300,
         )
     return OpenAICompatibleModelClient(
         model=config.model or "gpt-5.4",
-        base_url=config.base_url or os.environ.get("OPENAI_API_BASE", "https://www.right.codes/codex/v1"),
-        api_key=config.api_key or os.environ.get("OPENAI_API_KEY", ""),
+        base_url=config.base_url
+        or os.environ.get("OPENAI_API_BASE", "")
+        or str(provider_config.get("base_url", "")).strip()
+        or "https://www.right.codes/codex/v1",
+        api_key=config.api_key
+        or os.environ.get("OPENAI_API_KEY", "")
+        or str(provider_config.get("api_key", "")).strip(),
         temperature=config.temperature,
         timeout=300,
     )
