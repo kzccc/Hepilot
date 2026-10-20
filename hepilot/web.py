@@ -236,6 +236,32 @@ class SessionManager:
         self.config = config
         self.handles = {}
         self.guard = threading.Lock()
+        self.reconcile_orphans()
+
+    def reconcile_orphans(self):
+        """把上次进程没跑完的 running 收回来。
+
+        进程被 kill（重启、崩溃、Ctrl+C）时，磁盘上会留下 status=running
+        但永远不会有 run_finished 的会话。启动时统一收口，否则它会一直
+        显示"运行中"，而且新消息会被 busy 挡住。
+        """
+        repaired = []
+        for meta in self.store.list():
+            if meta.get("status") != "running":
+                continue
+            session_id = meta["id"]
+            try:
+                header = self.store.read_header(session_id) or {}
+                self.store.append_event(
+                    {"id": session_id, "workspace_root": header.get("workspace_root", "")},
+                    "run_interrupted",
+                    {"reason": "process_restarted", "last_run_id": header.get("last_run_id", "")},
+                )
+                self.store.update_header(session_id, status="interrupted")
+                repaired.append(session_id)
+            except Exception:
+                continue
+        return repaired
 
     # ---- 创建与获取 ----
 
@@ -243,6 +269,12 @@ class SessionManager:
         root = Path(str(workspace_root)).expanduser().resolve()
         if not root.exists() or not root.is_dir():
             raise ValueError(f"workspace does not exist or is not a directory: {root}")
+        if root.parent == root:
+            # 盘符根/文件系统根：list_files 会列出整块盘，
+            # 高风险工具的工作区快照要递归 hash 整块盘，能把 run 卡死。
+            raise ValueError(
+                f"refusing to use a filesystem root as workspace: {root}. 请选一个具体的项目目录。"
+            )
         session_id = time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(3).hex()
         session = {
             "id": session_id,
@@ -571,6 +603,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return self._send_error_json("not found", 404)
         except KeyError as exc:
             return self._send_error_json(str(exc), 404)
+        except ValueError as exc:
+            # 工作区不合法（不存在 / 不是目录 / 是盘符根）属于用户输入问题。
+            return self._send_error_json(str(exc), 400)
         except RuntimeError as exc:
             return self._send_error_json(str(exc), 409)
         except Exception as exc:

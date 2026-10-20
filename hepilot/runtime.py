@@ -35,6 +35,10 @@ DEFAULT_FEATURE_FLAGS = {
 }
 # checkpoint 的格式版本
 CHECKPOINT_SCHEMA_VERSION = "phase1-v1"
+# 工作区快照的硬上限：防止把盘符根当成工作区时把 run 卡死。
+MAX_SNAPSHOT_FILES = 4000
+MAX_SNAPSHOT_FILE_BYTES = 4 * 1024 * 1024
+SNAPSHOT_TIME_BUDGET_SECONDS = 20.0
 #一般作为默认状态使用
 CHECKPOINT_NONE_STATUS = "no-checkpoint"
 #三种checkpoint的恢复状态
@@ -849,11 +853,19 @@ class Hepilot:
         return payload
 
     def capture_workspace_snapshot(self):
-        """抓取工作区文件内容摘要，用于工具前后 diff。"""
+        """抓取工作区文件内容摘要，用于工具前后 diff。
+
+        必须带上限：工作区一旦是盘符根（比如 D:\），无上限地 rglob + sha256
+        会让整个 run 卡死在这里。超时/超额时返回已抓到的部分——
+        少看见几个文件，比整个会话不可用要好得多。
+        """
         snapshot = {}
+        deadline = time.monotonic() + SNAPSHOT_TIME_BUDGET_SECONDS
         #从工作区根目录 self.root 开始，递归遍历所有文件和目录。
         #rglob("*") 的意思差不多就是“把整个工作区里的所有路径都扫一遍”。
         for path in self.root.rglob("*"):
+            if len(snapshot) >= MAX_SNAPSHOT_FILES or time.monotonic() > deadline:
+                break
             #把一个绝对路径先变成相对工作区根目录的路径，
             #再拆成“每一级目录名/文件名”的元组，返回类型是 tuple[str, ...]
             #如果不在root下面,会抛出错误直接下一个文件/文件夹
@@ -866,6 +878,12 @@ class Hepilot:
                 continue
             #文件夹也直接跳过
             if not path.is_file():
+                continue
+            # 超大文件不参与 diff：读它既慢又没意义（构建产物、数据集）。
+            try:
+                if path.stat().st_size > MAX_SNAPSHOT_FILE_BYTES:
+                    continue
+            except OSError:
                 continue
             # 读取文件字节并计算 sha256，把“相对路径 -> 内容哈希”记进快照；单个文件读取失败时直接跳过，不影响整体扫描。
             try:

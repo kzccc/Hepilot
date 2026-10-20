@@ -6,18 +6,20 @@
 <title>hepilot</title>
 <style>
   :root {
-    --bg: #0b0c0e;
-    --panel: #13151a;
-    --panel-2: #171a20;
-    --border: #23262d;
-    --border-soft: #1c1f25;
-    --fg: #e7e8ea;
-    --dim: #9aa0a6;
-    --faint: #6b7178;
-    --accent: #5b8def;
-    --ok: #3fb950;
-    --warn: #d29922;
-    --err: #f85149;
+    --bg: #ffffff;
+    --panel: #fafbfc;
+    --panel-2: #f3f4f6;
+    --border: #e4e7eb;
+    --border-soft: #eef0f2;
+    --fg: #1f2328;
+    --dim: #59636e;
+    --faint: #8b949e;
+    --accent: #1f6feb;
+    --accent-soft: #eaf1fe;
+    --ok: #1a7f37;
+    --warn: #9a6700;
+    --err: #cf222e;
+    --shadow: 0 1px 2px rgba(27, 31, 36, .06), 0 3px 8px rgba(27, 31, 36, .04);
     --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   }
@@ -30,7 +32,8 @@
   }
   button { font-family: inherit; font-size: inherit; cursor: pointer; }
   ::-webkit-scrollbar { width: 10px; height: 10px; }
-  ::-webkit-scrollbar-thumb { background: #2a2e36; border-radius: 6px; }
+  ::-webkit-scrollbar-thumb { background: #d8dee4; border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { background: #c6cdd5; }
   ::-webkit-scrollbar-track { background: transparent; }
 
   .app { display: grid; grid-template-columns: 272px 1fr; height: 100vh; }
@@ -44,16 +47,16 @@
     display: flex; align-items: center; gap: 8px;
     padding: 16px 16px 12px; font-weight: 600; letter-spacing: .2px;
   }
-  .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+  .brand .dot { width: 8px; height: 8px; border-radius: 2px; background: var(--fg); }
   .brand-sub { font-size: 11px; color: var(--faint); font-weight: 400; margin-left: auto; font-family: var(--mono); }
 
   .new-btn {
     margin: 0 12px 12px; padding: 9px 12px; border-radius: 8px;
-    background: var(--accent); color: #fff; border: none; font-weight: 500;
+    background: var(--fg); color: #fff; border: none; font-weight: 500;
     display: flex; align-items: center; justify-content: center; gap: 6px;
-    transition: filter .15s;
+    transition: opacity .15s;
   }
-  .new-btn:hover { filter: brightness(1.08); }
+  .new-btn:hover { opacity: .87; }
 
   .group-label {
     padding: 10px 16px 4px; font-size: 11px; color: var(--faint);
@@ -66,11 +69,12 @@
     cursor: pointer; border: 1px solid transparent;
   }
   .session:hover { background: var(--panel-2); }
-  .session.active { background: var(--panel-2); border-color: var(--border); }
+  .session.active { background: var(--accent-soft); border-color: #cfe0fb; }
   .session .t { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .session .m { font-size: 11px; color: var(--faint); font-family: var(--mono); margin-top: 2px; }
   .badge { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 10px; font-family: var(--mono); }
-  .badge.running { background: rgba(210,153,34,.15); color: var(--warn); }
+  .badge.running { background: #fff6e0; color: var(--warn); }
+  .badge.interrupted { background: #ffebe9; color: var(--err); }
 
   /* ---- main ---- */
   .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -103,17 +107,17 @@
     width: 58px; flex: 0 0 58px; padding-top: 3px; text-transform: uppercase;
   }
   .msg .body { flex: 1; min-width: 0; }
-  .msg.user .body .text { color: #f2f3f5; }
+  .msg.user .body .text { color: var(--fg); }
   .msg .text { white-space: pre-wrap; word-break: break-word; }
 
   .card {
-    border: 1px solid var(--border); border-radius: 9px; background: var(--panel);
-    margin: 10px 0; overflow: hidden;
+    border: 1px solid var(--border); border-radius: 9px; background: #fff;
+    margin: 10px 0; overflow: hidden; box-shadow: var(--shadow);
   }
   .card-head {
     display: flex; align-items: center; gap: 8px; padding: 8px 12px;
     font-family: var(--mono); font-size: 12px; color: var(--dim);
-    background: var(--panel-2); border-bottom: 1px solid var(--border-soft);
+    background: var(--panel); border-bottom: 1px solid var(--border-soft);
   }
   .card-head .name { color: var(--fg); }
   .card-head .args { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -128,9 +132,9 @@
     padding: 1px 7px; border-radius: 4px; margin-bottom: 4px;
     border: 1px solid transparent;
   }
-  .kbadge.muted { color: var(--faint); border-color: var(--border); }
-  .kbadge.ok { color: var(--ok); border-color: rgba(63,185,80,.45); }
-  .kbadge.warn { color: var(--warn); border-color: rgba(210,153,34,.45); }
+  .kbadge.muted { color: var(--faint); border-color: var(--border); background: var(--panel); }
+  .kbadge.ok { color: var(--ok); border-color: #a7d3b3; background: #f0f9f2; }
+  .kbadge.warn { color: var(--warn); border-color: #f0d9a8; background: #fffaef; }
   .text.streaming::after {
     content: "▍"; color: var(--accent); margin-left: 1px;
     animation: blink 1s steps(2, start) infinite;
@@ -141,26 +145,27 @@
   .cp::before { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
   .cp::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
 
-  .err { border-left: 2px solid var(--err); padding: 6px 12px; color: #ffb3ad; font-family: var(--mono); font-size: 12px; }
+  .err { border-left: 2px solid var(--err); padding: 6px 12px; color: #a40e26; font-family: var(--mono); font-size: 12px; }
 
   .approval {
-    border: 1px solid rgba(210,153,34,.4); background: rgba(210,153,34,.07);
+    border: 1px solid #f0d9a8; background: #fffaef;
     border-radius: 9px; padding: 12px; margin: 10px 0;
   }
   .approval .h { font-size: 12px; color: var(--warn); font-family: var(--mono); margin-bottom: 6px; }
   .approval .b { display: flex; gap: 8px; margin-top: 10px; }
-  .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel-2); color: var(--fg); }
-  .btn:hover { background: #1f2329; }
-  .btn.ok { border-color: rgba(63,185,80,.5); color: var(--ok); }
-  .btn.no { border-color: rgba(248,81,73,.4); color: var(--err); }
+  .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: #fff; color: var(--fg); }
+  .btn:hover { background: var(--panel-2); }
+  .btn.ok { border-color: #a7d3b3; color: var(--ok); }
+  .btn.no { border-color: #f3bdbe; color: var(--err); }
 
   .composer { flex: 0 0 auto; border-top: 1px solid var(--border); padding: 14px 0 18px; }
   .composer .wrap { display: flex; flex-direction: column; gap: 8px; }
   .input-wrap {
-    display: flex; align-items: flex-end; gap: 8px; background: var(--panel);
+    display: flex; align-items: flex-end; gap: 8px; background: #fff;
     border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px;
+    box-shadow: var(--shadow);
   }
-  .input-wrap:focus-within { border-color: #34405a; }
+  .input-wrap:focus-within { border-color: #b6cdf7; box-shadow: 0 0 0 3px var(--accent-soft); }
   textarea {
     flex: 1; resize: none; border: none; outline: none; background: transparent;
     color: var(--fg); font-family: var(--sans); font-size: 14px; line-height: 1.55;
@@ -172,29 +177,32 @@
   }
   .send:disabled { opacity: .45; cursor: not-allowed; }
   .stop {
-    border: 1px solid rgba(248,81,73,.45); background: transparent; color: var(--err);
+    border: 1px solid var(--border); background: #fff; color: var(--err);
     border-radius: 7px; padding: 7px 12px; font-weight: 500;
   }
-  .stop:disabled { opacity: .35; cursor: not-allowed; border-color: var(--border); color: var(--faint); }
+  .stop:hover:not(:disabled) { background: #fff5f5; border-color: #f3bdbe; }
+  .stop:disabled { opacity: .45; cursor: not-allowed; color: var(--faint); }
   .hint { font-size: 11px; color: var(--faint); font-family: var(--mono); }
 
   /* ---- modal ---- */
   .overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,.62);
+    position: fixed; inset: 0; background: rgba(27, 31, 36, .32);
     display: none; align-items: center; justify-content: center; z-index: 50;
   }
   .overlay.show { display: flex; }
   .modal {
     width: 660px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px);
-    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    background: #fff; border: 1px solid var(--border); border-radius: 12px;
     display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 12px 40px rgba(27, 31, 36, .18);
   }
   .modal h3 { margin: 0; padding: 16px 18px 12px; font-size: 15px; font-weight: 500; }
   .modal .path-row { display: flex; gap: 8px; padding: 0 18px 12px; }
   .modal .path-row input {
-    flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+    flex: 1; background: #fff; border: 1px solid var(--border); border-radius: 7px;
     color: var(--fg); padding: 7px 10px; font-family: var(--mono); font-size: 12px; outline: none;
   }
+  .modal .path-row input:focus { border-color: #b6cdf7; box-shadow: 0 0 0 3px var(--accent-soft); }
   .browser { flex: 1; overflow-y: auto; border-top: 1px solid var(--border-soft); min-height: 200px; }
   .entry {
     display: flex; align-items: center; gap: 8px; padding: 6px 18px;
@@ -264,6 +272,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const state = { sessions: [], current: null, lastSeq: 0, es: null, busy: false, live: null };
+const STATUS_LABEL = { idle: "空闲", running: "运行中", interrupted: "已中断" };
 
 function fmtTime(iso) {
   if (!iso) return "";
@@ -310,6 +319,7 @@ function renderSessions() {
       `<div class="t">${escapeHtml(s.title || s.id)}</div>` +
       `<div class="m">${fmtTime(s.updated_at)} · ${s.event_count} 事件` +
       (s.status === "running" ? ' <span class="badge running">运行中</span>' : "") +
+      (s.status === "interrupted" ? ' <span class="badge interrupted">已中断</span>' : "") +
       `</div>`;
     el.onclick = () => openSession(s.id);
     root.appendChild(el);
@@ -327,10 +337,12 @@ async function openSession(id) {
   $("sessionTitle").textContent = data.session.title || id;
   $("workspaceChip").textContent = data.session.workspace_root;
   $("workspaceChip").title = data.session.workspace_root;
-  $("statusChip").textContent = data.session.status || "idle";
+  $("statusChip").textContent = STATUS_LABEL[data.session.status] || data.session.status || "idle";
   $("send").disabled = false;
   $("input").disabled = false;
-  $("hint").textContent = "Enter 发送 · Shift+Enter 换行";
+  $("hint").textContent = data.session.status === "interrupted"
+    ? "上次运行被中断（服务重启/崩溃）。可以直接继续发消息。"
+    : "Enter 发送 · Shift+Enter 换行";
   const stream = $("stream");
   stream.innerHTML = '<div class="wrap" id="wrap"></div>';
   state.live = null;
