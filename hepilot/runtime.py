@@ -312,6 +312,13 @@ class Hepilot:
         )
         self.session["memory"] = self.memory.to_dict()
         self.tools = self.build_tools()
+        # 只有后端支持 tools 字段时才构造 function calling 定义；
+        # 不支持的后端（Ollama /api/generate）继续走 prompt 里的文本协议。
+        self.function_tools = (
+            toolkit.build_function_tools(self.tools)
+            if getattr(model_client, "supports_functions", False)
+            else []
+        )
         self.prefix_state = self.build_prefix()
         self.prefix = self.prefix_state.text
         self.context_manager = ContextManager(self)
@@ -1504,6 +1511,10 @@ class Hepilot:
                     "prompt_cache_key": prompt_cache_key,
                     "prompt_cache_retention": prompt_cache_retention,
                 }
+                # 工具定义走 function calling 通道；后端不支持时这里为空，
+                # 模型只能靠文本协议（老路径），两者都能被 parse() 收下。
+                if self.function_tools:
+                    complete_kwargs["tools"] = self.function_tools
                 # 只有前端明确要流式时才传 on_delta；不传就保持一次性返回，
                 # 这样既有测试里的极简 client（不接受该参数）不会被破坏。
                 if self.stream_sink is not None:

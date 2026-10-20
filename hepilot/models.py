@@ -34,6 +34,8 @@ class FakeModelClient:
         self.outputs = list(outputs)
         self.prompts = []
         self.supports_prompt_cache = False
+        # 替身模型不走 function calling：测试里直接喂 <tool> 文本
+        self.supports_functions = False
         self.last_completion_metadata = {}
 
     def complete(self, prompt, max_new_tokens, **kwargs):
@@ -56,6 +58,8 @@ class OllamaModelClient:
         self.top_p = top_p
         self.timeout = timeout
         self.supports_prompt_cache = False
+        # `/api/generate` 不支持 tools 字段，所以这里坚持走文本协议
+        self.supports_functions = False
         self.last_completion_metadata = {}
 
     def complete(self, prompt, max_new_tokens, on_delta=None, cancel=None, **kwargs):
@@ -163,6 +167,66 @@ def _normalize_versioned_base_url(base_url):
     return base
 
 
+def synthesize_tool_call_text(slots):
+    """把 function calling 返回的 tool_calls 还原成本项目的 <tool> 文本协议。
+
+    为什么要绕这一圈：
+    模型走结构化通道返回 tool_calls，但我们内部整条链路（parse / history /
+    trace / UI）都建在 <tool>{...}</tool> 文本上。在这里做一次单向翻译，
+    下游一行都不用改。
+
+    slots 是 {index: {"name": str, "arguments": str}}，arguments 是
+    增量拼起来的 JSON 字符串。JSON 解析成功就生成规范块；解析失败说明
+    参数被截断，生成一个未闭合的 <tool 开标签——这样 looks_truncated()
+    能认出它，走截断提示而不是报"格式错误"。
+
+    多个调用之间用单换行分隔，保持和 extract_tool_blocks 的解析习惯一致。
+    """
+    blocks = []
+    for index in sorted(slots):
+        slot = slots[index]
+        name = str(slot.get("name", "")).strip()
+        if not name:
+            continue
+        raw_arguments = str(slot.get("arguments", "")).strip()
+        try:
+            args = json.loads(raw_arguments) if raw_arguments else {}
+        except json.JSONDecodeError:
+            # 参数被截断：故意留一个没闭合的开标签，交给截断检测处理
+            blocks.append(f'<tool name="{name}">')
+            continue
+        if not isinstance(args, dict):
+            args = {}
+        payload = json.dumps({"name": name, "args": args}, ensure_ascii=False)
+        blocks.append(f"<tool>{payload}</tool>")
+    return "\n".join(blocks)
+
+
+def _accumulate_tool_call_deltas(slots, delta):
+    """累积流式 tool_calls 分片。
+
+    function.name 只在第一片出现一次，function.arguments 是逐块到达的
+    JSON 字符串碎片，必须按 index 拼回去才能 json.loads。
+    """
+    for call in delta.get("tool_calls") or []:
+        index = call.get("index", 0)
+        slot = slots.setdefault(index, {"name": "", "arguments": ""})
+        function = (call or {}).get("function") or {}
+        if function.get("name"):
+            slot["name"] = function["name"]
+        if function.get("arguments"):
+            slot["arguments"] += function["arguments"]
+
+
+def _join_stream_and_tools(pieces, slots):
+    """把流式正文和结构化工具调用合成一份文本。"""
+    text = "".join(pieces)
+    tool_text = synthesize_tool_call_text(slots)
+    if not tool_text:
+        return text
+    return (text + "\n" + tool_text).strip() if text.strip() else tool_text
+
+
 def _extract_openai_text(data):
     """尽量兼容不同 OpenAI-compatible 响应形状提取文本。"""
     #如果传进来的 data 里有 output_text 字段,直接返回它的值,这是最简单直接的情况
@@ -180,14 +244,25 @@ def _extract_openai_text(data):
     if choices:
         message = choices[0].get("message", {})
         content = message.get("content")
+        # 结构化工具调用优先拼接：模型可能只回 tool_calls、content 为 null
+        slots = {}
+        for position, call in enumerate(message.get("tool_calls") or []):
+            function = (call or {}).get("function") or {}
+            slots[position] = {
+                "name": function.get("name", ""),
+                "arguments": function.get("arguments", ""),
+            }
+        tool_text = synthesize_tool_call_text(slots)
         if isinstance(content, str):
-            return content
+            return (content + "\n" + tool_text).strip() if tool_text else content
         if isinstance(content, list):
             for item in content:
                 if isinstance(item, dict):
                     text = item.get("text")
                     if text:
-                        return text
+                        return (text + "\n" + tool_text).strip() if tool_text else text
+        if tool_text:
+            return tool_text
 
     return ""
 
@@ -300,16 +375,19 @@ class OpenAICompatibleModelClient:
         self.supports_prompt_cache = self.api_style == "responses" and any(
             host in self.base_url for host in ("openai.com", "right.codes")
         )
+        # `/chat/completions` 支持 tools 字段；`/responses` 走的是另一套，
+        # 这里只在 chat 路径注入，避免把参数发到不认它的接口上。
+        self.supports_functions = self.api_style == "chat"
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None, cancel=None):
+    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None, cancel=None, tools=None):
         """按探测到的接口风格发起一次调用，可选地流式回吐文本增量。"""
         _check_cancel(cancel)
         if self.api_style == "chat":
-            return self._complete_chat(prompt, max_new_tokens, on_delta, cancel)
+            return self._complete_chat(prompt, max_new_tokens, on_delta, cancel, tools=tools)
         return self._complete_responses(prompt, max_new_tokens, prompt_cache_key, prompt_cache_retention, on_delta, cancel)
 
-    def _complete_chat(self, prompt, max_new_tokens, on_delta=None, cancel=None):
+    def _complete_chat(self, prompt, max_new_tokens, on_delta=None, cancel=None, tools=None):
         """`/chat/completions` 路径：DeepSeek 等只提供这个接口的后端走这里。
 
         流式时逐行读响应，而不是先 read() 再解析——否则既不是真流式，
@@ -323,6 +401,10 @@ class OpenAICompatibleModelClient:
             "max_tokens": max_new_tokens,
             "stream": streaming,
         }
+        if tools:
+            # 工具定义走 function calling 通道，不再写在 prompt 文本里。
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         if self.temperature is not None:
             payload["temperature"] = self.temperature
 
@@ -455,6 +537,7 @@ class OpenAICompatibleModelClient:
     def _read_chat_stream(self, response, on_delta, cancel=None):
         """逐行读 SSE 响应：这才是真正的增量，且能在中途检查取消。"""
         pieces = []
+        tool_slots = {}
         for raw_line in response:
             _check_cancel(cancel)
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -475,11 +558,13 @@ class OpenAICompatibleModelClient:
                     pieces.append(delta)
                     if on_delta is not None:
                         on_delta(delta)
-        return "".join(pieces)
+                _accumulate_tool_call_deltas(tool_slots, choice.get("delta") or {})
+        return _join_stream_and_tools(pieces, tool_slots)
 
     def _consume_chat_stream(self, body_text, on_delta, cancel=None):
         """解析 chat/completions 的 SSE 流，逐块回调并拼接全文。"""
         pieces = []
+        tool_slots = {}
         for line in body_text.splitlines():
             line = line.strip()
             if not line.startswith("data:"):
@@ -499,7 +584,8 @@ class OpenAICompatibleModelClient:
                     pieces.append(delta)
                     if on_delta is not None:
                         on_delta(delta)
-        return "".join(pieces)
+                _accumulate_tool_call_deltas(tool_slots, choice.get("delta") or {})
+        return _join_stream_and_tools(pieces, tool_slots)
 
     def _complete_responses(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None, cancel=None):
         """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
@@ -643,13 +729,31 @@ class OpenAICompatibleModelClient:
 
 
 def _extract_anthropic_text(data):
-    """从 Anthropic-compatible `content` 数组里抽取纯文本。"""
-    for item in data.get("content", []):
-        if isinstance(item, dict) and item.get("type") == "text":
+    """从 Anthropic-compatible `content` 数组里抽取文本，并翻译 tool_use 块。
+
+    Anthropic 的原生工具调用是 content 数组里 type="tool_use" 的块，
+    形如 {"name": "read_file", "input": {"path": "a.go"}}。
+    这里同样翻译成本项目的 <tool> 文本协议。
+    """
+    texts = []
+    slots = {}
+    for position, item in enumerate(data.get("content", [])):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
             text = item.get("text")
             if isinstance(text, str) and text:
-                return text
-    return ""
+                texts.append(text)
+        elif item.get("type") == "tool_use":
+            slots[position] = {
+                "name": str(item.get("name", "")),
+                "arguments": json.dumps(item.get("input") or {}, ensure_ascii=False),
+            }
+    tool_text = synthesize_tool_call_text(slots)
+    body = "".join(texts)
+    if tool_text:
+        return (body + "\n" + tool_text).strip() if body.strip() else tool_text
+    return body
 
 
 class AnthropicCompatibleModelClient:
@@ -662,9 +766,11 @@ class AnthropicCompatibleModelClient:
         self.temperature = temperature
         self.timeout = timeout
         self.supports_prompt_cache = False
+        # `/messages` 支持 tools，形状是 name/description/input_schema
+        self.supports_functions = True
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None, cancel=None):
+    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None, on_delta=None, cancel=None, tools=None):
         """向 Anthropic-compatible 后端发起一次文本请求，可选流式。"""
         # 为了保持统一接口，runtime 仍然会传缓存参数进来；
         # 这里只是显式丢弃，因为当前 Anthropic-compatible 路径没有接缓存复用。
@@ -689,6 +795,16 @@ class AnthropicCompatibleModelClient:
             "max_tokens": max_new_tokens,
             "stream": False,
         }
+        if tools:
+            # Anthropic 的工具定义形状和 OpenAI 不同：参数放在 input_schema 里
+            payload["tools"] = [
+                {
+                    "name": item["function"]["name"],
+                    "description": item["function"].get("description", ""),
+                    "input_schema": item["function"]["parameters"],
+                }
+                for item in tools
+            ]
         if self.temperature is not None:
             payload["temperature"] = self.temperature
 

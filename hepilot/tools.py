@@ -82,8 +82,155 @@ TOOL_EXAMPLES = {
     "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
     "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
     "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-    "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":20}}</tool>',
+    "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":50}}</tool>',
 }
+
+# function calling 的工具定义（OpenAI 的 tools 字段格式，Anthropic 从同一份转换）。
+#
+# 为什么手写而不从 BASE_TOOL_SPECS 自动转换：
+# 只有 7 个工具，手写才有地方写清楚三件事——
+#   1) 每个参数到底是什么（模型看不到实现代码）
+#   2) 运行时才生效的约束（timeout 区间、delegate 步数区间）
+#   3) 什么时候该用、什么时候不该用
+# 第 2 条尤其重要：以前 timeout 的 [1,600] 只写在运行时校验里，模型看不到，
+# 撞上就被拒绝、然后它就开始换参数重试。
+FUNCTION_TOOL_DEFINITIONS = {
+    "list_files": {
+        "description": "列出工作目录下的文件和目录（不递归）。想了解仓库结构时先用它。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "相对工作目录的路径，默认 '.'",
+                }
+            },
+            "required": [],
+        },
+    },
+    "read_file": {
+        "description": (
+            "按行范围读取一个 UTF-8 文本文件。改文件之前必须先读它。"
+            "同一个文件在一次运行里读到第 5 次会被拒绝。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "相对工作目录的文件路径"},
+                "start": {"type": "integer", "description": "起始行，从 1 开始，默认 1"},
+                "end": {"type": "integer", "description": "结束行（含），默认 200"},
+            },
+            "required": ["path"],
+        },
+    },
+    "search": {
+        "description": (
+            "在工作目录里搜索文本。找具体符号或字符串用它，不要为这种事起子 agent。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "要搜索的字面文本"},
+                "path": {"type": "string", "description": "搜索起点，默认 '.'"},
+            },
+            "required": ["pattern"],
+        },
+    },
+    "run_shell": {
+        "description": (
+            "在工作目录执行 shell 命令。仅用于必须靠 shell 完成的系统命令、"
+            "构建和进程管理。会请求用户批准。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "要执行的命令"},
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 600,
+                    "description": "超时秒数，默认 60。装依赖或完整编译请给到 300 以上。",
+                },
+            },
+            "required": ["command"],
+        },
+    },
+    "write_file": {
+        "description": (
+            "写入一个文本文件，会覆盖同名文件。会请求用户批准。"
+            "一次只写一个文件：多个大文件塞进一轮回复会被输出长度截断。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "相对工作目录的文件路径"},
+                "content": {"type": "string", "description": "完整文件内容"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    "patch_file": {
+        "description": (
+            "把文件里一段精确文本替换成新文本。优先用它而不是重写整个文件。"
+            "会请求用户批准。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "相对工作目录的文件路径"},
+                "old_text": {"type": "string", "description": "要替换的原文，必须精确匹配"},
+                "new_text": {"type": "string", "description": "替换后的文本"},
+            },
+            "required": ["path", "old_text", "new_text"],
+        },
+    },
+    "delegate": {
+        "description": (
+            "让一个只读的子 agent 去做受控调查，只把结论带回来。"
+            "适合需要超过 3 次查询的调研；找单个文件或符号不值得用它。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "交给子 agent 的调查任务，要具体"},
+                "max_steps": {
+                    "type": "integer",
+                    "minimum": DELEGATE_MIN_STEPS,
+                    "maximum": DELEGATE_MAX_STEPS,
+                    "description": (
+                        f"子 agent 的步数预算，区间 {DELEGATE_MIN_STEPS}~{DELEGATE_MAX_STEPS}。"
+                        f"低于 {DELEGATE_MIN_STEPS} 会被抬到 {DELEGATE_MIN_STEPS}。"
+                    ),
+                },
+            },
+            "required": ["task"],
+        },
+    },
+}
+
+
+def build_function_tools(registry):
+    """把当前可用的工具注册表转成 OpenAI 的 tools 数组。
+
+    registry 是 {name: {schema, risky, description, run}}，只取这里定义过的；
+    没定义的工具不注入，避免模型调用一个没有 schema 的工具。
+    """
+    tools = []
+    for name in registry:
+        definition = FUNCTION_TOOL_DEFINITIONS.get(name)
+        if definition is None:
+            continue
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": definition["description"],
+                    "parameters": definition["parameters"],
+                },
+            }
+        )
+    return tools
 
 
 def build_tool_registry(agent):
