@@ -38,8 +38,7 @@ CHECKPOINT_SCHEMA_VERSION = "phase1-v1"
 
 # 模型偶尔会退回自己在训练时见过的原生函数调用方言
 # （DeepSeek 的 <｜｜DSML｜｜...>、Anthropic 的 <antml:invoke>、
-# 通用的 <function_calls> / <invoke name=）。这些都不是本项目的协议，
-# 但明显是在"要调工具"，绝不能当成最终回答回给用户。
+# 通用的 <function_calls> / <invoke name=）。这些都不是本项目的协议。
 FOREIGN_TOOL_CALL_PATTERN = re.compile(
     r"</?\s*[｜|]{0,2}\s*DSML"
     r"|<antml:"
@@ -48,6 +47,20 @@ FOREIGN_TOOL_CALL_PATTERN = re.compile(
     r"|<tool_call\s*>",
     re.IGNORECASE,
 )
+
+# DeepSeek 的原生调用方言单独解析成工具调用，而不是打回重试。
+# 实测（"测试2"会话）：模型连续 8 次只会输出 DSML，怎么纠正都不换格式。
+# 一味拒绝的后果是整轮空转，什么也不做；把它翻译过来才有实际产出。
+_DSML_MARK = r"[｜|\uFF5C]{0,2}\s*DSML\s*[｜|\uFF5C]{0,2}"
+DSML_INVOKE_PATTERN = re.compile(
+    rf"<{_DSML_MARK}\s*invoke\s+name=\"([^\"]+)\"[^>]*>(.*?)(?=</{_DSML_MARK}\s*invoke>|$)",
+    re.S,
+)
+DSML_PARAMETER_PATTERN = re.compile(
+    rf"<{_DSML_MARK}\s*parameter\s+name=\"([^\"]+)\"[^>]*>(.*?)"
+    rf"(?=</?{_DSML_MARK}\s*(?:parameter|invoke)|$)",
+    re.S,
+)
 # 工作区快照的硬上限：防止把盘符根当成工作区时把 run 卡死。
 MAX_SNAPSHOT_FILES = 4000
 MAX_SNAPSHOT_FILE_BYTES = 4 * 1024 * 1024
@@ -55,6 +68,8 @@ SNAPSHOT_TIME_BUDGET_SECONDS = 20.0
 # 同一个文件在同一轮里最多读几次。超过就说明模型在打转，
 # 而不是在"多读一点"——它的每轮重读都会把上一轮挤出上下文窗口。
 READ_REPEAT_LIMIT = 4
+# 连续这么多次工具失败之后，在结果里追加"停下来汇报阻塞"的提醒。
+FAILURE_STREAK_NOTICE = 6
 #一般作为默认状态使用
 CHECKPOINT_NONE_STATUS = "no-checkpoint"
 #三种checkpoint的恢复状态
@@ -283,6 +298,8 @@ class Hepilot:
         # 按路径统计 read_file 次数；ask() 每轮开始时会重置，
         # 这里先初始化，避免直接调 run_tool 的调用方碰到 AttributeError。
         self._read_counts = {}
+        # 连续失败计数：达到阈值时在工具结果里追加"停下来汇报阻塞"的提醒。
+        self._consecutive_failures = 0
         self.last_completion_metadata = {}
         self.last_durable_promotions = []
         self.last_durable_rejections = []
@@ -1264,6 +1281,7 @@ class Hepilot:
         prompt = ""
         # 同一条 run 内按路径统计 read_file 次数，用于识别"反复读同一个文件"的坏循环。
         self._read_counts = {}
+        self._consecutive_failures = 0
         while tool_steps < self.max_steps and attempts < max_attempts:
             # 取消检查放在最前面：用户按下停止后，不再发起新的模型调用。
             if self._cancelled():
@@ -1787,7 +1805,7 @@ class Hepilot:
                 "diff_summary": diff_summary,
             }
             self.record_process_note_for_tool(name, self._last_tool_result_metadata)
-            return result
+            return self._with_failure_notice(result, tool_status)
         except Exception as exc:
             # 工具真正执行时抛异常后，先重新抓一次工作区快照；这样即使执行失败，也能判断它有没有留下部分副作用。
             after_snapshot = self.capture_workspace_snapshot() if tool["risky"] else before_snapshot
@@ -1812,7 +1830,30 @@ class Hepilot:
             # 把这次失败/部分成功的过程态写成 process note，帮助后续轮次知道“出了什么问题”。
             self.record_process_note_for_tool(name, self._last_tool_result_metadata)
             # 把异常包装成统一的错误文本返回给模型，让下一轮可以基于这份反馈调整动作。
-            return f"error: tool {name} failed: {exc}"
+            return self._with_failure_notice(f"error: tool {name} failed: {exc}", "error")
+
+    def _with_failure_notice(self, text, tool_status):
+        """连续失败时，在结果里追加一条"别再重试、直接汇报阻塞"的提醒。
+
+        为什么需要：
+        "测试1"会话里模型为了跑通 go build，换着法子试 GOPATH/GOPROXY/
+        HTTP_PROXY 共 83 次，每次都是超时或同一个错。它并不缺信息，
+        缺的是"该停了"这个信号——上下文里只有一条条并列的失败，
+        没有任何东西告诉它"这已经是同一类失败的第六次"。
+        """
+        if tool_status in {"ok", "partial_success"}:
+            self._consecutive_failures = 0
+            return text
+        self._consecutive_failures += 1
+        if self._consecutive_failures < FAILURE_STREAK_NOTICE:
+            return text
+        return (
+            f"{text}\n\n[RUNTIME NOTICE] This is the {self._consecutive_failures}th "
+            "consecutive failed tool call in this run. Do not retry another variation "
+            "of the same command. If you are blocked by something outside the code "
+            "(network, missing credentials, missing toolchain), stop and say so in a "
+            "<final> answer, or change strategy to something that does not need it."
+        )
 
     def repeated_tool_call(self, name, args):
         """检测最近是否重复发起同一个工具调用。"""
@@ -1971,9 +2012,20 @@ class Hepilot:
         #如果前面的 <tool> / <final> 解析都没命中，那就把模型原始输出当成普通最终答案处理；
         raw = raw.strip()
         if raw:
+            # 优先尝试把 DeepSeek 的 DSML 方言翻译成工具调用。
+            # 实测模型会连续多轮只会输出 DSML，打回重试只会让整轮空转。
+            dsml_calls = Hepilot.parse_dsml_tool_calls(raw)
+            if dsml_calls:
+                return "tool_batch", [
+                    {
+                        "id": "toolu_" + uuid.uuid4().hex,
+                        "name": call["name"],
+                        "args": call["args"],
+                    }
+                    for call in dsml_calls
+                ]
             # 但"裸文本就是答案"的前提是它确实是自然语言。
-            # 模型有时会输出别家的原生工具调用方言，那种东西必须打回去重做，
-            # 否则用户会收到一段 <｜｜DSML｜｜ invoke ...> 的乱码当成回答。
+            # 识别不了的别家方言必须打回去，否则用户会收到一段乱码当成回答。
             if Hepilot.looks_like_foreign_tool_call(raw):
                 return "retry", Hepilot.retry_notice(None, foreign=True)
             return "final", raw
@@ -1990,6 +2042,35 @@ class Hepilot:
         """
         text = str(raw)
         return text.count("<tool") > text.count("</tool>")
+
+    @staticmethod
+    def parse_dsml_tool_calls(raw):
+        """把 DeepSeek 的 DSML 调用方言翻译成本项目的工具调用。
+
+        形如：
+            <｜｜DSML｜｜ invoke name="delegate">
+            <｜｜DSML｜｜ parameter name="task" string="true">...</｜｜DSML｜｜ parameter>
+            </｜｜DSML｜｜ invoke>
+
+        返回 [{"name": ..., "args": {...}}]，解析不出来就返回 []。
+        """
+        text = str(raw)
+        calls = []
+        for invoke in DSML_INVOKE_PATTERN.finditer(text):
+            name = invoke.group(1).strip()
+            if not name:
+                continue
+            args = {}
+            for parameter in DSML_PARAMETER_PATTERN.finditer(invoke.group(2)):
+                key = parameter.group(1).strip()
+                value = parameter.group(2)
+                if not key:
+                    continue
+                # 去掉值两端的空白，但保留内部换行（写文件的内容靠它）
+                stripped = value.strip("\n").strip()
+                args[key] = stripped
+            calls.append({"name": name, "args": args})
+        return calls
 
     @staticmethod
     def looks_like_foreign_tool_call(raw):

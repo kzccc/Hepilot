@@ -25,15 +25,17 @@ DSML = (
 )
 
 
-def test_dsml_markup_is_not_accepted_as_final_answer():
-    kind, payload = Hepilot.parse(DSML)
+def test_dsml_markup_is_never_delivered_as_a_final_answer():
+    # DSML 现在会被翻译成 tool_batch（见 test_dsml_translation.py），
+    # 但无论如何都不能作为"最终回答"交付给用户。
+    kind, _ = Hepilot.parse(DSML)
 
-    assert kind == "retry"
-    assert "foreign tool-call dialect" in payload
+    assert kind != "final"
 
 
 def test_foreign_notice_tells_the_model_the_exact_syntax():
-    _, payload = Hepilot.parse(DSML)
+    # DSML 已经转为翻译路径，这里用真正无法解析的方言验证提示语
+    _, payload = Hepilot.parse('<antml:invoke name="read_file">{"path": "a"}</antml:invoke>')
 
     assert '"name"' in payload and '"args"' in payload
     assert "<|DSML|>" in payload

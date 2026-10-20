@@ -38,7 +38,10 @@ BASE_TOOL_SPECS = {
         "description": "Search the workspace with rg or a simple fallback.",
     },
     "run_shell": {
-        "schema": {"command": "str", "timeout": "int=20"},
+        # 依赖安装和完整编译动辄几分钟，20 秒的默认值会把正常的
+        # `go mod tidy` / `npm install` 全部判成超时，然后模型就开始
+        # 换着法子重试同样的命令。
+        "schema": {"command": "str", "timeout": "int=60"},
         "risky": True,
         "description": "Run a shell command in the repo root.",
     },
@@ -132,9 +135,9 @@ def validate_tool(agent, name, args):
         command = str(args.get("command", "")).strip()
         if not command:
             raise ValueError("command must not be empty")
-        timeout = int(args.get("timeout", 20))
-        if timeout < 1 or timeout > 120:
-            raise ValueError("timeout must be in [1, 120]")
+        timeout = int(args.get("timeout", 60))
+        if timeout < 1 or timeout > 600:
+            raise ValueError("timeout must be in [1, 600]")
         return
     #写文件需要检查路径不能是文件夹,并且必须提供content参数(写的内容)
     if name == "write_file":
@@ -308,9 +311,9 @@ def tool_run_shell(agent, args):
     command = str(args.get("command", "")).strip()
     if not command:
         raise ValueError("command must not be empty")
-    timeout = int(args.get("timeout", 20))
-    if timeout < 1 or timeout > 120:
-        raise ValueError("timeout must be in [1, 120]")
+    timeout = int(args.get("timeout", 60))
+    if timeout < 1 or timeout > 600:
+        raise ValueError("timeout must be in [1, 600]")
     cancel = getattr(agent, "cancel_token", None)
 
     cancelled = False
