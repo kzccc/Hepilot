@@ -54,6 +54,11 @@
   }
   .new-btn:hover { opacity: .87; }
   .new-btn:disabled { opacity: .5; cursor: wait; }
+  .sub-link {
+    margin: -4px 12px 10px; padding: 2px 0; font-size: 11px; color: var(--faint);
+    font-family: var(--mono); cursor: pointer; user-select: none;
+  }
+  .sub-link:hover { color: var(--accent); }
 
   .search-box { margin: 0 12px 8px; }
   .search-box input {
@@ -188,6 +193,7 @@
   <aside class="side">
     <div class="brand"><span class="dot"></span><span>hepilot</span><span class="brand-sub" id="modelChip">local</span></div>
     <button class="new-btn" id="newBtn">＋ 新建会话</button>
+    <div class="sub-link" id="manualBtn">手动输入路径</div>
     <div class="search-box"><input id="filter" placeholder="过滤会话…" /></div>
     <div class="sessions" id="sessions"></div>
   </aside>
@@ -353,8 +359,18 @@ function sessionRow(s) {
     el.innerHTML =
       `<div class="row1"><span class="t">${escapeHtml(sessionLabel(s))}</span>${badge}</div>` +
       `<div class="m">${fmtTime(s.updated_at) || "—"} · ${s.event_count} 事件</div>`;
-    el.onclick = () => openSession(s.id);
-    el.ondblclick = (e) => { e.preventDefault(); state.renaming = s.id; renderSessions(); };
+    // 单击要延迟：openSession 会重建侧栏，元素一换 dblclick 就永远不会触发。
+    let clickTimer = null;
+    el.onclick = () => {
+      clearTimeout(clickTimer);
+      clickTimer = setTimeout(() => openSession(s.id), 220);
+    };
+    el.ondblclick = (e) => {
+      e.preventDefault();
+      clearTimeout(clickTimer);
+      state.renaming = s.id;
+      renderSessions();
+    };
     el.title = s.id;
   }
   return el;
@@ -656,38 +672,70 @@ async function stop() {
   catch (err) { console.error(err); }
 }
 
+async function pickFolder() {
+  await api("/api/pick-folder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const deadline = Date.now() + 180000;
+  const cancelOnEsc = async (e) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    try { await api("/api/pick-folder/cancel", { method: "POST" }); } catch (err) { /* ignore */ }
+  };
+  document.addEventListener("keydown", cancelOnEsc);
+  try {
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const result = await api("/api/pick-folder");
+      if (result.status === "done") return result.path;
+      if (result.status === "error") throw new Error(result.error || "已取消选择");
+    }
+    throw new Error("选择超时");
+  } finally {
+    document.removeEventListener("keydown", cancelOnEsc);
+  }
+}
+
+async function createSessionAt(path) {
+  const data = await api("/api/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace_root: path }),
+  });
+  await loadSessions();
+  await openSession(data.session.id);
+  $("hint").textContent = "Enter 发送 · Shift+Enter 换行 · 双击左侧会话可重命名";
+}
+
 async function newSession() {
   const btn = $("newBtn");
+  if (btn.disabled) return;
   btn.disabled = true;
   const original = btn.textContent;
-  btn.textContent = "选择文件夹…";
+  btn.textContent = "等待选择…";
+  $("hint").textContent = "已弹出系统文件夹选择框；看不到的话请检查任务栏，或按 Esc 取消。";
   try {
-    const picked = await api("/api/pick-folder", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-    btn.textContent = "创建中…";
-    const data = await api("/api/sessions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspace_root: picked.path }),
-    });
-    await loadSessions();
-    await openSession(data.session.id);
+    await createSessionAt(await pickFolder());
   } catch (err) {
-    // 系统对话框不可用时退回手输路径
-    const manual = window.prompt("无法弹出系统文件夹选择框（" + err.message + "）\n请手动输入工作区路径：", "");
-    if (!manual) return;
-    try {
-      const data = await api("/api/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace_root: manual }),
-      });
-      await loadSessions();
-      await openSession(data.session.id);
-    } catch (err2) { window.alert("创建失败：" + err2.message); }
+    const manual = window.prompt("没能选择目录（" + err.message + "）\n请手动输入工作区路径：", "");
+    if (manual) {
+      try { await createSessionAt(manual); }
+      catch (err2) { window.alert("创建失败：" + err2.message); }
+    }
   } finally {
     btn.disabled = false;
     btn.textContent = original;
+    $("hint").textContent = "Enter 发送 · Shift+Enter 换行 · 双击左侧会话可重命名";
   }
+}
+
+async function manualSession() {
+  const path = window.prompt("输入工作区路径（例如 D:\\code\\myrepo）：", "");
+  if (!path) return;
+  try { await createSessionAt(path); }
+  catch (err) { window.alert("创建失败：" + err.message); }
 }
 
 function autosize() {
@@ -699,6 +747,7 @@ function autosize() {
 /* ------------------------------ wiring ------------------------------ */
 
 $("newBtn").onclick = newSession;
+$("manualBtn").onclick = manualSession;
 $("tabChat").onclick = () => setView("chat");
 $("tabTrail").onclick = () => setView("trail");
 $("send").onclick = send;

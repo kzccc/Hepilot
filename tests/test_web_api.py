@@ -1,5 +1,8 @@
 """Web 接口层：原生目录选择、重命名、轨迹折叠。"""
 
+import threading
+import time
+
 import pytest
 
 from hepilot import web as web_mod
@@ -10,38 +13,89 @@ from hepilot.web import build_trajectory
 # --------------------------------------------------------- 原生目录选择
 
 
-class _FakeRun:
-    def __init__(self, stdout):
-        self.stdout = stdout
-        self.stderr = ""
-        self.returncode = 0
+def fake_popen(stdout="", capture=None):
+    """构造一个假的 Popen：只关心 stdout 与 env。"""
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.killed = False
+            if capture is not None:
+                capture["env"] = kwargs.get("env") or {}
+                capture["args"] = args
+
+        def communicate(self, timeout=None):
+            return stdout, ""
+
+        def kill(self):
+            self.killed = True
+
+    return FakePopen
 
 
-def test_pick_folder_returns_last_stdout_line(monkeypatch):
-    monkeypatch.setattr(web_mod.subprocess, "run", lambda *a, **k: _FakeRun("noise\nD:\\repo\\proj\n"))
-    assert web_mod.pick_folder_native() == "D:\\repo\\proj"
+def test_run_folder_picker_returns_last_stdout_line(monkeypatch):
+    monkeypatch.setattr(web_mod.subprocess, "Popen", fake_popen("noise\nD:\\repo\\proj\n"))
+    assert web_mod.run_folder_picker() == "D:\\repo\\proj"
 
 
-def test_pick_folder_passes_initial_path_via_env(monkeypatch):
+def test_run_folder_picker_passes_initial_path_via_env(monkeypatch):
     captured = {}
-
-    def fake_run(args, **kwargs):
-        captured["env"] = kwargs.get("env") or {}
-        captured["script"] = args[-1]
-        return _FakeRun("")
-
-    monkeypatch.setattr(web_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(web_mod.subprocess, "Popen", fake_popen("", captured))
     with pytest.raises(RuntimeError, match="no folder selected"):
-        web_mod.pick_folder_native("D:\\")
+        web_mod.run_folder_picker("D:\\")
     # 盘符根以反斜杠结尾，绝不能拼进脚本字符串
     assert captured["env"]["HEPILOT_PICK_INITIAL"] == "D:\\"
-    assert "D:\\'" not in captured["script"]
+    assert "D:\\'" not in captured["args"][-1]
 
 
-def test_pick_folder_raises_when_user_cancels(monkeypatch):
-    monkeypatch.setattr(web_mod.subprocess, "run", lambda *a, **k: _FakeRun(""))
+def test_run_folder_picker_raises_when_user_cancels(monkeypatch):
+    monkeypatch.setattr(web_mod.subprocess, "Popen", fake_popen(""))
     with pytest.raises(RuntimeError, match="no folder selected"):
-        web_mod.pick_folder_native()
+        web_mod.run_folder_picker()
+
+
+def test_picker_start_is_idempotent_and_reports_result(monkeypatch):
+    release = threading.Event()
+    started = threading.Event()
+
+    def fake_pick(initial="", on_start=None):
+        started.set()
+        release.wait(3)
+        return "D:\\picked"
+
+    monkeypatch.setattr(web_mod, "run_folder_picker", fake_pick)
+    picker = web_mod.FolderPicker()
+    assert picker.result()["status"] == "idle"
+
+    assert picker.start()["status"] == "pending"
+    started.wait(2)
+    # 重复点击不该报错
+    assert picker.start()["status"] == "pending"
+
+    release.set()
+    for _ in range(100):
+        if picker.result()["status"] == "done":
+            break
+        time.sleep(0.02)
+    assert picker.result() == {"status": "done", "path": "D:\\picked", "error": ""}
+
+
+def test_picker_cancel_is_reported_as_error(monkeypatch):
+    release = threading.Event()
+
+    def fake_pick(initial="", on_start=None):
+        release.wait(3)
+        return "x"
+
+    monkeypatch.setattr(web_mod, "run_folder_picker", fake_pick)
+    picker = web_mod.FolderPicker()
+    picker.start()
+    assert picker.cancel() is True
+    assert picker.result()["status"] == "error"
+    # 已经不在 pending，再取消返回 False
+    assert picker.cancel() is False
+    release.set()
 
 
 # ------------------------------------------------------------- 重命名

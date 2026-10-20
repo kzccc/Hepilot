@@ -29,6 +29,7 @@ from .workspace import WorkspaceContext
 
 ASSETS_DIR = Path(__file__).parent / "web_assets"
 APPROVAL_TIMEOUT_SECONDS = 300
+PICKER_TIMEOUT_SECONDS = 180
 GLOBAL_CONFIG_PATH = Path.home() / ".hepilot" / "config.json"
 
 
@@ -237,6 +238,7 @@ class SessionManager:
         self.config = config
         self.handles = {}
         self.guard = threading.Lock()
+        self.picker = FolderPicker()
         self.reconcile_orphans()
 
     def reconcile_orphans(self):
@@ -547,50 +549,143 @@ def transcript_from_events(events):
     return items
 
 
-_PICKER_LOCK = threading.Lock()
-
-
-def pick_folder_native(initial=""):
-    """弹出操作系统的原生目录选择框。
+def run_folder_picker(initial="", on_start=None):
+    """弹出操作系统的原生目录选择框，阻塞直到用户选完或取消。
 
     只在本地场景可用（服务跑在用户自己的桌面上）。用系统的文件夹对话框
     而不是自己画一个，是因为用户要的就是"像选本地文件夹那样选"。
     """
     if os.name != "nt":
         raise RuntimeError("native folder picker is only implemented on Windows")
-    if not _PICKER_LOCK.acquire(blocking=False):
-        raise RuntimeError("folder picker is already open")
+    # 初始路径通过环境变量传入，而不是拼进脚本字符串：
+    # 路径里可能带引号，盘符根还会以反斜杠结尾，拼字符串会破语法。
+    #
+    # 为什么要一个 TopMost 的隐藏 owner：
+    # 从后台进程弹出的对话框不会抢焦点，实测会被浏览器整个盖住，
+    # 用户以为"没弹出来"。给一个 topmost 的透明 owner，对话框就会浮在最前。
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "$owner = New-Object System.Windows.Forms.Form;"
+        "$owner.TopMost = $true;"
+        "$owner.ShowInTaskbar = $false;"
+        "$owner.FormBorderStyle = 'None';"
+        "$owner.StartPosition = 'Manual';"
+        "$owner.Size = New-Object System.Drawing.Size(1,1);"
+        "$owner.Location = New-Object System.Drawing.Point(-3000,-3000);"
+        "$owner.Opacity = 0;"
+        "$owner.Show();"
+        "$owner.Activate();"
+        "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+        "$d.Description = 'Select workspace folder';"
+        "$d.ShowNewFolderButton = $true;"
+        "if ($env:HEPILOT_PICK_INITIAL) { $d.SelectedPath = $env:HEPILOT_PICK_INITIAL };"
+        "$r = $d.ShowDialog($owner);"
+        "if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath };"
+        "$owner.Close();"
+        "$owner.Dispose()"
+    )
+    env = dict(os.environ)
+    env["HEPILOT_PICK_INITIAL"] = str(initial or os.path.expanduser("~"))
+    process = subprocess.Popen(
+        ["powershell", "-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        # 不弹黑色控制台窗口：它会抢焦点、还可能盖住对话框本身。
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if on_start is not None:
+        on_start(process)
     try:
-        # 初始路径通过环境变量传入，而不是拼进脚本字符串：
-        # 路径里可能带引号，盘符根还会以反斜杠结尾，拼字符串会破语法。
-        script = (
-            "Add-Type -AssemblyName System.Windows.Forms;"
-            "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
-            "$d.Description = 'Select workspace folder';"
-            "$d.ShowNewFolderButton = $true;"
-            "if ($env:HEPILOT_PICK_INITIAL) { $d.SelectedPath = $env:HEPILOT_PICK_INITIAL };"
-            "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }"
-        )
-        env = dict(os.environ)
-        env["HEPILOT_PICK_INITIAL"] = str(initial or os.path.expanduser("~"))
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-STA", "-Command", script],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=300,
-            env=env,
-        )
-        chosen = (result.stdout or "").strip().splitlines()
-        path = chosen[-1].strip() if chosen else ""
-        if not path:
-            raise RuntimeError("no folder selected")
-        return path
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("folder picker timed out") from exc
-    finally:
-        _PICKER_LOCK.release()
+        stdout, _stderr = process.communicate(timeout=PICKER_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise RuntimeError("folder picker timed out")
+    lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError("no folder selected")
+    return lines[-1]
+
+
+class FolderPicker:
+    """原生目录选择框的状态机。
+
+    对话框会一直阻塞到用户动手，所以不能把它挂在 HTTP 请求里——请求
+    超时、用户关掉页面、点了第二次，都会留下一个没人收的对话框。
+    这里改成后台线程跑，前端轮询结果，随时可以取消。
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._state = "idle"  # idle | pending | done | error
+        self._path = ""
+        self._error = ""
+        self._process = None
+
+    def _snapshot(self):
+        return {"status": self._state, "path": self._path, "error": self._error}
+
+    def start(self, initial=""):
+        with self._lock:
+            if self._state == "pending":
+                # 重复点击不算错，直接返回当前状态。
+                return self._snapshot()
+            self._state = "pending"
+            self._path = ""
+            self._error = ""
+            self._process = None
+        threading.Thread(target=self._run, args=(initial,), daemon=True).start()
+        return self.result()
+
+    def _run(self, initial):
+        try:
+            path = run_folder_picker(initial, on_start=self._attach)
+            with self._lock:
+                self._state = "done"
+                self._path = path
+        except Exception as exc:
+            with self._lock:
+                if self._state == "pending":
+                    self._state = "error"
+                    self._error = str(exc)
+        finally:
+            with self._lock:
+                self._process = None
+
+    def _attach(self, process):
+        with self._lock:
+            if self._state != "pending":
+                cancelled = True
+            else:
+                cancelled = False
+                self._process = process
+        if cancelled:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+    def result(self):
+        with self._lock:
+            return self._snapshot()
+
+    def cancel(self):
+        with self._lock:
+            if self._state != "pending":
+                return False
+            self._state = "error"
+            self._error = "cancelled"
+            process = self._process
+        if process is not None:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        return True
 
 
 def list_directory(path):
@@ -686,6 +781,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return self._send_asset(path[len("/static/"):])
             if path == "/api/sessions":
                 return self._send_json({"sessions": self.manager.store.list()})
+            if path == "/api/pick-folder":
+                return self._send_json(self.manager.picker.result())
             if path == "/api/fs":
                 target = (query.get("path") or [""])[0]
                 return self._send_json(list_directory(target or Path.home()))
@@ -722,7 +819,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         payload = self._read_json()
         try:
             if path == "/api/pick-folder":
-                return self._send_json({"path": pick_folder_native(payload.get("initial", ""))})
+                # 只是"开始选择"，立刻返回；结果由前端轮询 GET 拿。
+                return self._send_json(self.manager.picker.start(payload.get("initial", "")))
+            if path == "/api/pick-folder/cancel":
+                return self._send_json({"ok": self.manager.picker.cancel()})
             if path == "/api/sessions":
                 handle = self.manager.create(
                     payload.get("workspace_root", ""),
