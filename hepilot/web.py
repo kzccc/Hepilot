@@ -59,7 +59,8 @@ class AgentConfig:
     api_key: str = ""
     api_style: str = ""
     temperature: float = 0.2
-    max_steps: int = 20
+    max_steps: int = 100
+    max_attempts: int = 100
     max_new_tokens: int = 2048
     approval_policy: str = "ask"
     secret_env_names: tuple = ()
@@ -313,6 +314,7 @@ class SessionManager:
             run_store=RunStore(self.store.dir_for(session["workspace_root"], session["id"]) / "runs"),
             approval_policy=self.config.approval_policy,
             max_steps=self.config.max_steps,
+            max_attempts=self.config.max_attempts,
             max_new_tokens=self.config.max_new_tokens,
             secret_env_names=tuple(self.config.secret_env_names or ()),
             user_memory_root=memorylib.default_user_memory_root(),
@@ -953,7 +955,8 @@ def main(argv=None):
     parser.add_argument("--api-key", default="")
     parser.add_argument("--api-style", default="", choices=("", "responses", "chat"), help="openai 兼容接口风格；留空按 base_url 自动判断")
     parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--max-steps", type=int, default=20)
+    parser.add_argument("--max-steps", type=int, default=100)
+    parser.add_argument("--max-attempts", type=int, default=100)
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--approval", default="ask", choices=("ask", "auto", "never"))
     args = parser.parse_args(argv)
@@ -966,6 +969,7 @@ def main(argv=None):
         api_style=args.api_style,
         temperature=args.temperature,
         max_steps=args.max_steps,
+        max_attempts=args.max_attempts,
         max_new_tokens=args.max_new_tokens,
         approval_policy=args.approval,
     )
@@ -973,6 +977,7 @@ def main(argv=None):
     url = f"http://{args.host}:{args.port}/"
     print(f"hepilot web listening on {url}")
     print(f"sessions root: {Path(args.sessions_root).resolve()}")
+    print(f"limits: max_steps={config.max_steps} max_attempts={config.max_attempts}")
     print("Ctrl+C to stop.")
     try:
         server.serve_forever()

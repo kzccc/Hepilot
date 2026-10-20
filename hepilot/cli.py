@@ -320,6 +320,7 @@ def build_agent(args):
                 session_id=session_id,
                 approval_policy=args.approval,
                 max_steps=args.max_steps,
+                max_attempts=getattr(args, "max_attempts", None),
                 max_new_tokens=args.max_new_tokens,
                 secret_env_names=configured_secret_names,
                 user_memory_root=default_user_memory_root(),
@@ -341,6 +342,7 @@ def build_agent(args):
         session_store=store,
         approval_policy=args.approval,
         max_steps=args.max_steps,
+        max_attempts=getattr(args, "max_attempts", None),
         max_new_tokens=args.max_new_tokens,
         secret_env_names=configured_secret_names,
         user_memory_root=default_user_memory_root(),
@@ -374,7 +376,8 @@ def build_arg_parser():
         default=[],
         help="Extra environment variable names to treat as secrets for trace/report redaction.",
     )
-    parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
+    parser.add_argument("--max-steps", type=int, default=100, help="Maximum tool/model iterations per request.")
+    parser.add_argument("--max-attempts", type=int, default=100, help="Maximum model request rounds per run.")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
     parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to Ollama.")
     parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to Ollama.")

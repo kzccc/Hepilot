@@ -210,7 +210,8 @@ class Hepilot:
         session=None,
         run_store=None,
         approval_policy="ask",
-        max_steps=6,
+        max_steps=100,
+        max_attempts=None,
         max_new_tokens=512,
         depth=0,
         max_depth=1,
@@ -228,6 +229,8 @@ class Hepilot:
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = max_steps
+        # 模型请求轮次上限。为 None 时按 max_steps 推导，保证老调用方行为不变。
+        self.max_attempts = max_attempts
         self.max_new_tokens = max_new_tokens
         self.depth = depth
         self.max_depth = max_depth
@@ -1221,7 +1224,12 @@ class Hepilot:
 
         tool_steps = 0     # 真正执行了工具的次数
         attempts = 0       # 模型被调用的轮次（一轮可能因为输出非法而重试，不一定消耗 tool_step）
-        max_attempts = max(self.max_steps * 3, self.max_steps + 4)  # 调用次数上限，比 max_steps 宽松，防止模型反复输出非法内容导致死循环
+        # 模型请求轮次上限：显式配置优先，否则按 max_steps 推导，
+        # 避免模型反复输出非法内容时死循环。
+        if self.max_attempts is not None:
+            max_attempts = int(self.max_attempts)
+        else:
+            max_attempts = max(self.max_steps * 3, self.max_steps + 4)
 
         # 这是 agent 的主循环，可以按“感知 -> 决策 -> 行动 -> 记录”来理解：
         # 1. 感知：重新组 prompt，把当前状态整理给模型看
