@@ -56,6 +56,41 @@ def test_make_directory_rejects_missing_parent(tmp_path):
         web_mod.make_directory(str(tmp_path / "nope"), "x")
 
 
+# ------------------------------------------------- 前端渲染的静态约束
+
+
+def _index_html():
+    import hepilot
+
+    return (Path(hepilot.__file__).parent / "web_assets" / "index.html").read_text(encoding="utf-8")
+
+
+def test_kbadge_covers_every_message_kind():
+    """徽标表要覆盖后端所有 msgKind。
+
+    `stopped`（被取消的运行）曾经没在表里，查不到就回退到一个不存在的键，
+    解构 undefined 抛异常，整个 renderChat 中断——会话直接一片空白。
+    """
+    html = _index_html()
+    for kind in ("text", "tool", "final", "stopped", "retry"):
+        assert f"{kind}: [" in html, f"KBADGE 缺少 {kind}"
+
+
+def test_kbadge_fallback_points_at_an_existing_key():
+    import re
+
+    html = _index_html()
+    # 只检查真实的兜底调用点（|| KBADGE.xxx），注释里提到旧写法不算
+    assert not re.search(r"\|\|\s*KBADGE\.ok\b", html), "KBADGE 里没有 ok 这个键"
+    assert "BADGE_FALLBACK" in html
+
+
+def test_render_isolates_a_broken_turn():
+    """单轮渲染失败不能拖垮整个对话列表。"""
+    html = _index_html()
+    assert "轮渲染失败" in html
+
+
 # --------------------------------------------------------- 原生目录选择
 
 

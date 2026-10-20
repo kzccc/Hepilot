@@ -460,13 +460,13 @@ function buildTurns(items) {
     const turn = ensure();
     switch (it.kind) {
       case "assistant":
+        // 消息一旦落定，流式残留就该清掉：工具调用由下面的 steps 负责展示。
+        turn.live = "";
         if (it.msgKind === "tool" || (it.toolUses && it.toolUses.length)) {
-          // 工具调用本身不单独渲染：随后的 tool 结果里带着 name/args，避免重复
           break;
         }
         turn.answer = it.text || "";
         turn.answerKind = it.msgKind || "final";
-        turn.live = "";
         break;
       case "tool":
         turn.steps.push(it);
@@ -498,7 +498,17 @@ function buildTurns(items) {
 
 /* ------------------------------ chat render ------------------------------ */
 
-const KBADGE = { text: ["推理中", "muted"], tool: ["准备调用工具", "warn"], final: ["回答", "ok"], retry: ["格式重试", "warn"] };
+const KBADGE = {
+  text: ["推理中", "muted"],
+  tool: ["准备调用工具", "warn"],
+  final: ["回答", "ok"],
+  stopped: ["已停止", "warn"],
+  retry: ["格式重试", "warn"],
+};
+// 查不到类型时的兜底，必须是真实存在的数组：
+// 之前写成 KBADGE.ok（根本不存在的键），遇到 stopped 就整页渲染崩掉。
+const BADGE_FALLBACK = ["回答", "ok"];
+function badgeFor(kind) { return KBADGE[kind] || BADGE_FALLBACK; }
 
 function renderChat() {
   const wrap = $("wrap");
@@ -506,7 +516,14 @@ function renderChat() {
     wrap.innerHTML = '<div class="empty"><h2>开始一次会话</h2><p>点左上角「新建会话」，会弹出系统文件夹选择框。</p></div>';
     return;
   }
-  wrap.innerHTML = state.turns.map(turnHtml).join("");
+  // 单轮渲染失败不该让整个对话变空白：坏掉的那一轮单独报错，其余照常显示。
+  wrap.innerHTML = state.turns.map((turn, index) => {
+    try {
+      return turnHtml(turn);
+    } catch (err) {
+      return `<div class="turn"><div class="turn-body"><div class="err">第 ${index + 1} 轮渲染失败：${escapeHtml(err.message)}</div></div></div>`;
+    }
+  }).join("");
   bindStepToggles(wrap);
 }
 
@@ -541,7 +558,7 @@ function turnHtml(turn) {
     foot.push(`<div><span class="kbadge ${cls}">${label}</span></div>`);
     foot.push(`<div class="answer streaming">${escapeHtml(turn.live)}</div>`);
   } else if (turn.answer) {
-    const [label, cls] = KBADGE[turn.answerKind] || KBADGE.ok;
+    const [label, cls] = badgeFor(turn.answerKind);
     foot.push(`<div><span class="kbadge ${cls}">${label}</span></div>`);
     foot.push(`<div class="answer">${escapeHtml(turn.answer)}</div>`);
   }
