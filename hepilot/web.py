@@ -703,9 +703,46 @@ def list_workspaces(store):
     return {"workspaces": items}
 
 
+def list_drives():
+    """列出可用的盘符根 / 文件系统根，供选择器切换驱动器。"""
+    if os.name != "nt":
+        return {"drives": ["/"]}
+    drives = []
+    try:
+        import ctypes
+
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        drives = [f"{chr(65 + index)}:\\" for index in range(26) if mask & (1 << index)]
+    except Exception:
+        # 拿不到位掩码就退回探测常见盘符
+        drives = [f"{letter}:\\" for letter in "CDEFGH" if os.path.exists(f"{letter}:\\")]
+    return {"drives": drives}
+
+
+def make_directory(parent, name):
+    """在工作区选择器里新建一个文件夹。"""
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("文件夹名不能为空")
+    if name in {".", ".."} or any(char in name for char in '\\/:*?"<>|'):
+        raise ValueError(f"非法文件夹名: {name}")
+    base = Path(str(parent or "")).expanduser()
+    if not base.is_dir():
+        raise ValueError(f"父目录不存在: {base}")
+    target = (base / name).resolve()
+    if target.exists():
+        raise ValueError(f"目录已存在: {target}")
+    target.mkdir(parents=True)
+    return str(target)
+
+
 def list_directory(path):
     """给前端的工作区选择器列目录。"""
-    target = Path(str(path)).expanduser().resolve()
+    raw = str(path).strip()
+    # 输入 "D:" 时 Path 会当成"D 盘的当前目录"，这里补成盘符根。
+    if os.name == "nt" and len(raw) == 2 and raw[1] == ":":
+        raw = raw + "\\"
+    target = Path(raw or ".").expanduser().resolve()
     if not target.exists() or not target.is_dir():
         raise ValueError(f"not a directory: {target}")
     entries = []
@@ -800,6 +837,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json(self.manager.picker.result())
             if path == "/api/workspaces":
                 return self._send_json(list_workspaces(self.manager.store))
+            if path == "/api/drives":
+                return self._send_json(list_drives())
             if path == "/api/fs":
                 target = (query.get("path") or [""])[0]
                 return self._send_json(list_directory(target or Path.home()))
@@ -840,6 +879,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json(self.manager.picker.start(payload.get("initial", "")))
             if path == "/api/pick-folder/cancel":
                 return self._send_json({"ok": self.manager.picker.cancel()})
+            if path == "/api/mkdir":
+                created = make_directory(payload.get("parent", ""), payload.get("name", ""))
+                return self._send_json({"path": created})
             if path == "/api/sessions":
                 handle = self.manager.create(
                     payload.get("workspace_root", ""),

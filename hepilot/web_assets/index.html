@@ -86,6 +86,15 @@
     color: var(--dim); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .recent .chip2:hover { border-color: var(--accent); color: var(--accent); }
+  .recent .chip2.drive { color: var(--fg); font-weight: 500; }
+  .recent .chip2.drive:hover { background: var(--accent-soft); }
+  .inline-input {
+    width: 190px; border: 1px solid var(--border); border-radius: 7px;
+    padding: 5px 8px; font-family: var(--mono); font-size: 12px;
+    color: var(--fg); background: #fff; outline: none;
+  }
+  .inline-input:focus { border-color: #b6cdf7; box-shadow: 0 0 0 3px var(--accent-soft); }
+  .hidden { display: none !important; }
   .entries { flex: 1; overflow-y: auto; border-top: 1px solid var(--border-soft); min-height: 220px; }
   .entry {
     display: flex; align-items: center; gap: 8px; padding: 6px 18px;
@@ -272,11 +281,13 @@
       <input id="pathInput" placeholder="直接输入路径，或从下面的列表点进去" />
       <button class="ghost" id="upBtn">上一级</button>
     </div>
+    <div class="recent" id="drives"></div>
     <div class="recent" id="recent"></div>
     <div class="entries" id="entries"></div>
     <div class="modal-err" id="modalErr"></div>
     <div class="modal-foot">
-      <button class="ghost" id="nativeBtn">系统对话框</button>
+      <button class="ghost" id="mkdirBtn">＋ 新建文件夹</button>
+      <input class="inline-input hidden" id="mkdirName" placeholder="文件夹名，回车创建" />
       <span style="flex:1"></span>
       <button class="ghost" id="cancelBtn">取消</button>
       <button class="btn ok" id="useBtn">用这个目录新建</button>
@@ -769,6 +780,7 @@ let browsePath = "";
 async function openPicker() {
   $("overlay").classList.add("show");
   $("modalErr").textContent = "";
+  await loadDrives();
   const box = $("recent");
   box.innerHTML = "";
   try {
@@ -783,6 +795,39 @@ async function openPicker() {
     }
   } catch (err) { /* 最近工作区拿不到不影响手动浏览 */ }
   await browse("");
+}
+
+async function loadDrives() {
+  const box = $("drives");
+  box.innerHTML = "";
+  try {
+    const data = await api("/api/drives");
+    for (const drive of data.drives || []) {
+      const chip = document.createElement("span");
+      chip.className = "chip2 drive";
+      chip.textContent = drive;
+      chip.onclick = () => browse(drive);
+      box.appendChild(chip);
+    }
+  } catch (err) { /* 列不出盘符时仍可手输路径 */ }
+}
+
+async function newFolder() {
+  const name = ($("mkdirName").value || "").trim();
+  if (!name) return;
+  try {
+    const data = await api("/api/mkdir", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ parent: $("pathInput").value || browsePath, name }),
+    });
+    $("mkdirName").value = "";
+    $("mkdirName").classList.add("hidden");
+    $("modalErr").textContent = "";
+    await browse(data.path);
+  } catch (err) {
+    $("modalErr").textContent = err.message;
+  }
 }
 
 async function browse(path) {
@@ -863,8 +908,17 @@ $("upBtn").onclick = () => {
   const current = ($("pathInput").value || browsePath || "").replace(/[\\/][^\\/]*$/, "");
   browse(current || browsePath);
 };
-$("nativeBtn").onclick = nativePick;
+$("nativeBtn") && ($("nativeBtn").onclick = nativePick);
 $("pathInput").onkeydown = (e) => { if (e.key === "Enter") browse($("pathInput").value); };
+$("mkdirBtn").onclick = () => {
+  const input = $("mkdirName");
+  input.classList.toggle("hidden");
+  if (!input.classList.contains("hidden")) input.focus();
+};
+$("mkdirName").onkeydown = (e) => {
+  if (e.key === "Escape") { e.target.value = ""; e.target.classList.add("hidden"); return; }
+  if (e.key === "Enter") { e.preventDefault(); newFolder(); }
+};
 $("overlay").onclick = (e) => { if (e.target === $("overlay")) $("overlay").classList.remove("show"); };
 $("tabChat").onclick = () => setView("chat");
 $("tabTrail").onclick = () => setView("trail");

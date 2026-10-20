@@ -1,13 +1,59 @@
-"""Web 接口层：原生目录选择、重命名、轨迹折叠。"""
+"""Web 接口层：原生目录选择、重命名、轨迹折叠、盘符与建目录。"""
 
+import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
 from hepilot import web as web_mod
 from hepilot.session_store import SessionStore
 from hepilot.web import build_trajectory
+
+
+# ------------------------------------------------- 盘符切换 / 新建文件夹
+
+
+def test_list_drives_returns_usable_roots():
+    drives = web_mod.list_drives()["drives"]
+    assert drives
+    for drive in drives:
+        if os.name == "nt":
+            assert len(drive) == 3 and drive.endswith(":\\")
+            assert os.path.isdir(drive)
+        else:
+            assert drive == "/"
+
+
+def test_list_directory_normalises_bare_drive_letter():
+    if os.name != "nt":
+        pytest.skip("windows only")
+    data = web_mod.list_directory("C:")
+    assert data["path"] == "C:\\"
+
+
+def test_make_directory_creates_folder(tmp_path):
+    created = web_mod.make_directory(str(tmp_path), "新建的目录")
+    assert Path(created).is_dir()
+    assert Path(created).name == "新建的目录"
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "..", ".", "a/b", "a\\b", "x:y", "c*", "q?"])
+def test_make_directory_rejects_bad_names(tmp_path, bad):
+    with pytest.raises(ValueError):
+        web_mod.make_directory(str(tmp_path), bad)
+
+
+def test_make_directory_rejects_existing(tmp_path):
+    web_mod.make_directory(str(tmp_path), "dup")
+    with pytest.raises(ValueError, match="已存在"):
+        web_mod.make_directory(str(tmp_path), "dup")
+
+
+def test_make_directory_rejects_missing_parent(tmp_path):
+    with pytest.raises(ValueError, match="父目录不存在"):
+        web_mod.make_directory(str(tmp_path / "nope"), "x")
 
 
 # --------------------------------------------------------- 原生目录选择
