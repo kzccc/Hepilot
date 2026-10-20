@@ -91,6 +91,29 @@ def test_render_isolates_a_broken_turn():
     assert "轮渲染失败" in html
 
 
+def test_streaming_events_do_not_force_chat_to_bottom():
+    """工具调用等高频流事件不能改变用户当前的阅读位置。"""
+    import re
+
+    html = _index_html()
+    match = re.search(r"function openStream\(id, after\) \{([\s\S]*?)\n\}\n\nfunction closeStream", html)
+    assert match, "找不到 openStream 实现"
+    assert "scrollBottom()" not in match.group(1)
+
+
+def test_answers_use_safe_markdown_renderer():
+    """模型回答应按安全 Markdown 渲染，而不是作为转义后的纯文本。"""
+    import re
+
+    html = _index_html()
+    assert "function renderMarkdown(" in html
+    assert "function safeMarkdownHref(" in html
+    assert '<h${heading[1].length}>' in html and "<blockquote>" in html and "<pre><code${fence.lang" in html
+    assert re.search(r"safeMarkdownHref[\s\S]{0,500}javascript:", html, re.IGNORECASE)
+    assert re.search(r"renderMarkdown\(turn\.live\)", html)
+    assert re.search(r"renderMarkdown\(turn\.answer\)", html)
+
+
 # --------------------------------------------------------- 原生目录选择
 
 

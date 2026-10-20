@@ -186,6 +186,27 @@
 
   .turn-foot { padding: 12px 16px; border-top: 1px solid var(--border-soft); }
   .answer { white-space: pre-wrap; word-break: break-word; }
+  .answer.markdown { white-space: normal; }
+  .markdown > :first-child { margin-top: 0; }
+  .markdown > :last-child { margin-bottom: 0; }
+  .markdown h1, .markdown h2, .markdown h3, .markdown h4 { line-height: 1.35; margin: 1em 0 .45em; font-weight: 600; }
+  .markdown h1 { font-size: 1.45em; }
+  .markdown h2 { font-size: 1.28em; }
+  .markdown h3 { font-size: 1.12em; }
+  .markdown h4 { font-size: 1em; }
+  .markdown p, .markdown ul, .markdown ol, .markdown blockquote, .markdown pre, .markdown table { margin: .65em 0; }
+  .markdown ul, .markdown ol { padding-left: 1.6em; }
+  .markdown li + li { margin-top: .2em; }
+  .markdown blockquote { padding: 2px 12px; border-left: 3px solid var(--border); color: var(--dim); }
+  .markdown a { color: var(--accent); text-decoration: none; }
+  .markdown a:hover { text-decoration: underline; }
+  .markdown :not(pre) > code { padding: 1px 5px; border: 1px solid var(--border-soft); border-radius: 4px; background: var(--panel); font-family: var(--mono); font-size: .9em; }
+  .markdown pre { overflow-x: auto; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--panel); }
+  .markdown pre code { font-family: var(--mono); font-size: 12px; white-space: pre; }
+  .markdown table { display: block; width: max-content; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+  .markdown th, .markdown td { padding: 5px 9px; border: 1px solid var(--border); text-align: left; }
+  .markdown th { background: var(--panel); font-weight: 600; }
+  .markdown hr { border: 0; border-top: 1px solid var(--border); margin: 1em 0; }
   .answer.streaming::after { content: "▍"; color: var(--accent); margin-left: 1px; animation: blink 1s steps(2, start) infinite; }
   @keyframes blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
   .kbadge { display: inline-block; font-family: var(--mono); font-size: 10px; padding: 1px 7px; border-radius: 4px; margin-bottom: 5px; border: 1px solid transparent; }
@@ -510,6 +531,115 @@ const KBADGE = {
 const BADGE_FALLBACK = ["回答", "ok"];
 function badgeFor(kind) { return KBADGE[kind] || BADGE_FALLBACK; }
 
+function safeMarkdownHref(value) {
+  const href = String(value || "").trim();
+  if (!href || /[\u0000-\u0020]/.test(href) || /^javascript:/i.test(href)) return "";
+  if (/^(https?:|mailto:|#)/i.test(href)) return href;
+  return "";
+}
+
+function renderInlineMarkdown(value) {
+  const code = [];
+  let text = String(value || "").replace(/`([^`]+)`/g, (_, body) => {
+    const key = `\u0000CODE${code.length}\u0000`;
+    code.push(`<code>${escapeHtml(body)}</code>`);
+    return key;
+  });
+  text = escapeHtml(text);
+  text = text.replace(/!\[([^\]]*)\]\(([^\s)]+)(?:\s+"([^"]*)")?\)/g, (_, alt, src, title) => {
+    const href = safeMarkdownHref(src);
+    return href ? `<img src="${escapeHtml(href)}" alt="${escapeHtml(alt)}"${title ? ` title="${escapeHtml(title)}"` : ""} loading="lazy" />` : escapeHtml(alt);
+  });
+  text = text.replace(/\[([^\]]+)\]\(([^\s)]+)(?:\s+"([^"]*)")?\)/g, (_, label, src, title) => {
+    const href = safeMarkdownHref(src);
+    return href ? `<a href="${escapeHtml(href)}"${title ? ` title="${escapeHtml(title)}"` : ""} target="_blank" rel="noopener noreferrer">${label}</a>` : label;
+  });
+  text = text.replace(/\*\*(.+?)\*\*|__(.+?)__/g, "<strong>$1$2</strong>");
+  text = text.replace(/\*(.+?)\*|_(.+?)_/g, "<em>$1$2</em>");
+  text = text.replace(/~~(.+?)~~/g, "<del>$1</del>");
+  text = text.replace(/\u0000CODE(\d+)\u0000/g, (_, index) => code[Number(index)] || "");
+  return text;
+}
+
+function renderMarkdown(source) {
+  const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n");
+  const blocks = [];
+  let paragraph = [];
+  let list = null;
+  let quote = [];
+  let fence = null;
+  let codeLines = [];
+  const flushParagraph = () => {
+    if (paragraph.length) blocks.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (list) blocks.push(`<${list.type}>${list.items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</${list.type}>`);
+    list = null;
+  };
+  const flushQuote = () => {
+    if (quote.length) blocks.push(`<blockquote>${renderMarkdown(quote.join("\n"))}</blockquote>`);
+    quote = [];
+  };
+  const flushTextBlocks = () => { flushParagraph(); flushList(); flushQuote(); };
+  const splitTableRow = (line) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fenceMatch = line.match(/^\s*(```+|~~~+)([^`]*)$/);
+    if (fence) {
+      if (fenceMatch && fenceMatch[1][0] === fence.marker && fenceMatch[1].length >= fence.length) {
+        blocks.push(`<pre><code${fence.lang ? ` class="language-${escapeHtml(fence.lang)}"` : ""}>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+        fence = null;
+        codeLines = [];
+      } else codeLines.push(line);
+      continue;
+    }
+    if (fenceMatch) {
+      flushTextBlocks();
+      fence = { marker: fenceMatch[1][0], length: fenceMatch[1].length, lang: (fenceMatch[2].trim().split(/\s+/)[0] || "").replace(/[^\w+-]/g, "") };
+      continue;
+    }
+    if (!line.trim()) { flushTextBlocks(); continue; }
+    const quoteMatch = line.match(/^\s*>\s?(.*)$/);
+    if (quoteMatch) { flushParagraph(); flushList(); quote.push(quoteMatch[1]); continue; }
+    flushQuote();
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) { flushParagraph(); flushList(); blocks.push(`<h${heading[1].length}>${renderInlineMarkdown(heading[2])}</h${heading[1].length}>`); continue; }
+    if (/^\s{0,3}(?:---+|___+|\*\s*)$/.test(line)) { flushTextBlocks(); blocks.push("<hr>"); continue; }
+    if (line.includes("|") && index + 1 < lines.length && /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1])) {
+      flushTextBlocks();
+      const headers = splitTableRow(line);
+      const alignments = splitTableRow(lines[index + 1]).map((cell) => cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : cell.startsWith(":") ? "left" : "");
+      const renderCells = (cells, tag) => headers.map((_, cellIndex) => `<${tag}${alignments[cellIndex] ? ` style="text-align:${alignments[cellIndex]}"` : ""}>${renderInlineMarkdown(cells[cellIndex] || "")}</${tag}>`).join("");
+      const rows = [`<thead><tr>${renderCells(headers, "th")}</tr></thead>`];
+      index += 2;
+      const bodyRows = [];
+      while (index < lines.length && lines[index].includes("|")) {
+        bodyRows.push(`<tr>${renderCells(splitTableRow(lines[index]), "td")}</tr>`);
+        index += 1;
+      }
+      index -= 1;
+      if (bodyRows.length) rows.push(`<tbody>${bodyRows.join("")}</tbody>`);
+      blocks.push(`<table>${rows.join("")}</table>`);
+      continue;
+    }
+    const item = line.match(/^\s{0,3}([-+*]|\d+[.)])\s+(.+)$/);
+    if (item) {
+      flushParagraph();
+      const type = /^\d/.test(item[1]) ? "ol" : "ul";
+      if (list && list.type !== type) flushList();
+      if (!list) list = { type, items: [] };
+      list.items.push(item[2]);
+      continue;
+    }
+    flushList();
+    paragraph.push(line);
+  }
+  if (fence) blocks.push(`<pre><code${fence.lang ? ` class="language-${escapeHtml(fence.lang)}"` : ""}>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+  flushTextBlocks();
+  return blocks.join("");
+}
+
 function renderChat() {
   const wrap = $("wrap");
   if (!state.turns.length) {
@@ -556,11 +686,11 @@ function turnHtml(turn) {
   if (turn.live) {
     const [label, cls] = KBADGE[turn.liveKind] || KBADGE.text;
     foot.push(`<div><span class="kbadge ${cls}">${label}</span></div>`);
-    foot.push(`<div class="answer streaming">${escapeHtml(turn.live)}</div>`);
+    foot.push(`<div class="answer markdown streaming">${renderMarkdown(turn.live)}</div>`);
   } else if (turn.answer) {
     const [label, cls] = badgeFor(turn.answerKind);
     foot.push(`<div><span class="kbadge ${cls}">${label}</span></div>`);
-    foot.push(`<div class="answer">${escapeHtml(turn.answer)}</div>`);
+    foot.push(`<div class="answer markdown">${renderMarkdown(turn.answer)}</div>`);
   }
   if (turn.error) foot.push(`<div class="err">${escapeHtml(turn.error)}</div>`);
   if (turn.end) {
@@ -685,7 +815,6 @@ function openStream(id, after) {
       state.turns = buildTurns(state.items);
       if (state.view === "chat") {
         renderChat();
-        scrollBottom();
       }
     }
     if (event.type === "run_finished" || event.type === "run_failed") {
