@@ -1254,6 +1254,8 @@ class Hepilot:
         # 4. 记录：把结果写回 history / task_state / trace / memory
         # 然后进入下一轮，直到停机条件满足
         cancelled = False
+        # 保留最后一次组装的完整 prompt：步数打满时要靠它再要一次纯文本总结。
+        prompt = ""
         while tool_steps < self.max_steps and attempts < max_attempts:
             # 取消检查放在最前面：用户按下停止后，不再发起新的模型调用。
             if self._cancelled():
@@ -1576,8 +1578,18 @@ class Hepilot:
             task_state.stop_retry_limit(final)
         else:
             # 否则就是 tool_steps 先打满，表示虽然可能执行了工具，但始终没能在步数上限内收敛出最终答案。
-            final = "Stopped after reaching the step limit without a final answer."
-            task_state.stop_step_limit(final)
+            # 子 agent 的典型失败就是这样：文件都读完了，只是没来得及下结论，
+            # 直接判"没有最终答案"等于把整段调查工作丢掉。这里再要一次纯文本总结把它救回来。
+            salvaged = ""
+            if tool_steps > 0 and prompt:
+                salvaged = self.salvage_final_answer(task_state, prompt, user_message)
+            if salvaged:
+                final = salvaged
+                task_state.stop_step_limit(final)
+                self.emit_trace(task_state, "final_answer_salvaged", {"chars": len(salvaged)})
+            else:
+                final = "Stopped after reaching the step limit without a final answer."
+                task_state.stop_step_limit(final)
         #记录history
         self.record({"role": "assistant", "kind": "stopped", "content": final, "created_at": now()})
         #记录持久化记忆
@@ -1951,6 +1963,35 @@ class Hepilot:
     def looks_like_foreign_tool_call(raw):
         """判断输出是不是别家的原生函数调用方言。"""
         return bool(FOREIGN_TOOL_CALL_PATTERN.search(str(raw)))
+
+    def salvage_final_answer(self, task_state, prompt, user_message):
+        """步数打满时，再要一次**不带工具**的纯文本总结。
+
+        为什么需要：
+        子 agent 撞到 step_limit 时的收尾语是"没有最终答案"，
+        但那一刻它往往已经把该读的文件都读完了——只是没轮次下结论。
+        把这种情况当成失败返回，等于让父 agent 重新跑一遍全部调查。
+
+        返回空字符串表示没救回来（调用失败或模型仍然输出工具标记）。
+        """
+        instruction = (
+            "\n\n---\nYou have used every available step. Do not call any tool. "
+            "Answer now, in the same language as the original request: "
+            "state what you already established from the tool results above, "
+            "and say explicitly what is still unverified. Keep it under 200 words.\n"
+            f"Original request: {clip(str(user_message), 400)}"
+        )
+        try:
+            raw = self.model_client.complete(prompt + instruction, min(int(self.max_new_tokens), 1024))
+        except Exception as exc:
+            self.emit_trace(task_state, "final_answer_salvage_failed", {"error": str(exc)})
+            return ""
+        text = str(raw).strip()
+        if "<final>" in text:
+            text = self.extract(text, "final").strip()
+        if not text or self.looks_like_foreign_tool_call(text):
+            return ""
+        return text
 
     @staticmethod
     def retry_notice(problem=None, truncated=False, foreign=False):

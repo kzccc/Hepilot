@@ -53,16 +53,21 @@ BASE_TOOL_SPECS = {
         "description": "Replace one exact text block in a file.",
     },
 }
-#子代理(子agent)工具的规格说明
-DELEGATE_TOOL_SPEC = {
-    "schema": {"task": "str", "max_steps": "int=20"},
-    "risky": False,
-    "description": "Ask a bounded read-only child agent to investigate.",
-}
 # 子 agent 拿到的父级历史上限。原来只有 300 字符，
 # 路径这类长串经常被截断在中间，子 agent 会把截断后的片段当成真实环境。
 DELEGATE_HISTORY_CLIP = 1500
-DELEGATE_DEFAULT_STEPS = 20
+DELEGATE_DEFAULT_STEPS = 25
+# 模型会自己在参数里传 max_steps，而且经常传得很小（实测有 2、3、12、15），
+# 把默认值抬到 25 也拦不住它。所以这里对子 agent 的步数强制设下限：
+# 模型传的只是一个"建议"，真实预算由 runtime 兜底。
+DELEGATE_MIN_STEPS = 25
+DELEGATE_MAX_STEPS = 60
+#子代理(子agent)工具的规格说明
+DELEGATE_TOOL_SPEC = {
+    "schema": {"task": "str", "max_steps": f"int={DELEGATE_MIN_STEPS}"},
+    "risky": False,
+    "description": "Ask a bounded read-only child agent to investigate.",
+}
 #这个是当模型调用参数有问题时,就会到这里来针对性的取某个工具的用法示例,再喂给模型,帮助模型理解正确的调用方式和参数格式,从而纠正错误的调用方式
 TOOL_EXAMPLES = {
     "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
@@ -406,7 +411,9 @@ def tool_delegate(agent, args):
 
     # 子 agent 的预算原来小得离谱：默认 3 步，稍复杂一点的调查就会
     # "Stopped after reaching the step limit without a final answer"。
-    child_steps = int(args.get("max_steps", DELEGATE_DEFAULT_STEPS))
+    # 现在模型传的值只当建议，真实预算被夹在 [DELEGATE_MIN_STEPS, DELEGATE_MAX_STEPS]。
+    requested_steps = int(args.get("max_steps", DELEGATE_DEFAULT_STEPS))
+    child_steps = max(DELEGATE_MIN_STEPS, min(requested_steps, DELEGATE_MAX_STEPS))
     child = Hepilot(
         model_client=agent.model_client,
         workspace=agent.workspace,
