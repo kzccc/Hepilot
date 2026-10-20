@@ -4,9 +4,11 @@
 这份快照刻意保持小而稳定：主要包含 Git 事实和少量白名单项目文档。
 """
 
+import os
 import subprocess
 import hashlib
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +42,18 @@ IGNORED_PATH_NAMES = {".git", ".hepilot", "__pycache__", ".pytest_cache", ".ruff
 def now():
     """返回统一格式的 UTC 时间戳，供 session/trace/report 共用。"""
     return datetime.now(timezone.utc).isoformat()
+
+
+def shell_name():
+    """模型实际会用到的那个 shell。
+
+    必须报告"真正执行的那个"，不是用户的 $SHELL：run_shell 用
+    shell=True，Windows 上走 %COMSPEC%（cmd.exe），POSIX 上固定 /bin/sh。
+    报 $SHELL 会误导模型写成 zsh/bash 专用语法。
+    """
+    if os.name == "nt":
+        return os.environ.get("COMSPEC") or "cmd.exe"
+    return "/bin/sh"
 
 
 def clip(text, limit=MAX_TOOL_OUTPUT):
@@ -162,6 +176,11 @@ class WorkspaceContext:
             "Workspace:",
             f"- cwd: {self.cwd}",
             f"- repo_root: {self.repo_root}",
+            # 平台和 shell 是机器事实，之前完全没有告诉模型。
+            # run_shell 在 Windows 上走 cmd.exe，模型不知道就会写 export / mkdir -p
+            # 这类 POSIX 语法，白跑一轮。
+            f"- platform: {sys.platform}",
+            f"- shell: {shell_name()}",
             f"- branch: {self.branch}",
             f"- default_branch: {self.default_branch}",
             # 明确给出"是不是 git 仓库"，别让模型从 branch '-' 去猜；

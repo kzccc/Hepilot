@@ -607,6 +607,15 @@ class Hepilot:
             f"- 每轮有步数预算（当前 {self.max_steps} 步）。"
             "委派出去的子 agent 有自己的预算，且只能读、不能改文件。"
         )
+        if "run_shell" in self.tools:
+            # 只陈述事实：执行环境的变量是过滤过的。
+            # 不要在这里写"过滤导致了某个具体失败"——实测 go env -w
+            # 在过滤环境里是能成功的，把没验证过的因果写进 prompt 会误导模型。
+            lines.append(
+                "- 执行命令时的环境变量是白名单过滤的：只带 PATH、HOME、APPDATA、"
+                "TEMP、COMSPEC 这类基础变量，你的自定义环境变量不会存在。"
+                "需要某个变量时，请在命令里显式设置。"
+            )
         return "# 运行机制\n" + "\n".join(lines)
 
     def section_scope(self):
