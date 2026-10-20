@@ -10,18 +10,18 @@ import json
 from dataclasses import dataclass
 
 
-DEFAULT_TOTAL_BUDGET = 12000
+DEFAULT_TOTAL_BUDGET = 20000
 DEFAULT_SECTION_BUDGETS = {
-    "prefix": 3600,
-    "memory": 1600,
-    "relevant_memory": 1200,
-    "history": 5200,
+    "prefix": 6000,
+    "memory": 2400,
+    "relevant_memory": 1600,
+    "history": 9000,
 }
 DEFAULT_SECTION_FLOORS = {
-    "prefix": 1200,
-    "memory": 400,
-    "relevant_memory": 300,
-    "history": 1500,
+    "prefix": 2000,
+    "memory": 600,
+    "relevant_memory": 400,
+    "history": 2500,
 }
 # 当 prompt 超预算时，会优先压缩这些 section。
 DEFAULT_REDUCTION_ORDER = ("relevant_memory", "history", "memory", "prefix")
@@ -31,7 +31,12 @@ RELEVANT_MEMORY_LIMIT = 3
 
 
 def _tail_clip(text, limit):
-    """从尾部裁剪文本，保持 prompt section 不突破预算。"""
+    """按预算裁剪文本，保留**开头**并用省略号标记尾部被截断。
+
+    名字里的 tail 指的是"裁掉尾部"。调用方依赖这一点：
+    prefix 的 Workspace 头（cwd / repo_root / branch）必须留在最前面，
+    否则模型会看不到自己的工作目录。
+    """
     text = str(text)  # 统一转成字符串，避免传入非字符串对象时无法计算长度
     if limit <= 0:
         # 没有可用预算时，直接返回空文本。

@@ -55,10 +55,14 @@ BASE_TOOL_SPECS = {
 }
 #子代理(子agent)工具的规格说明
 DELEGATE_TOOL_SPEC = {
-    "schema": {"task": "str", "max_steps": "int=3"},
+    "schema": {"task": "str", "max_steps": "int=20"},
     "risky": False,
     "description": "Ask a bounded read-only child agent to investigate.",
 }
+# 子 agent 拿到的父级历史上限。原来只有 300 字符，
+# 路径这类长串经常被截断在中间，子 agent 会把截断后的片段当成真实环境。
+DELEGATE_HISTORY_CLIP = 1500
+DELEGATE_DEFAULT_STEPS = 20
 #这个是当模型调用参数有问题时,就会到这里来针对性的取某个工具的用法示例,再喂给模型,帮助模型理解正确的调用方式和参数格式,从而纠正错误的调用方式
 TOOL_EXAMPLES = {
     "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
@@ -67,7 +71,7 @@ TOOL_EXAMPLES = {
     "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
     "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
     "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-    "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":3}}</tool>',
+    "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":20}}</tool>',
 }
 
 
@@ -400,13 +404,17 @@ def tool_delegate(agent, args):
 
     from .runtime import Hepilot
 
+    # 子 agent 的预算原来小得离谱：默认 3 步，稍复杂一点的调查就会
+    # "Stopped after reaching the step limit without a final answer"。
+    child_steps = int(args.get("max_steps", DELEGATE_DEFAULT_STEPS))
     child = Hepilot(
         model_client=agent.model_client,
         workspace=agent.workspace,
         session_store=agent.session_store,
         run_store=agent.run_store,
         approval_policy="never",
-        max_steps=int(args.get("max_steps", 3)),
+        max_steps=child_steps,
+        max_attempts=max(child_steps * 2, DELEGATE_DEFAULT_STEPS),
         max_new_tokens=agent.max_new_tokens,
         depth=agent.depth + 1,
         max_depth=agent.max_depth,
@@ -416,9 +424,15 @@ def tool_delegate(agent, args):
         user_memory_root=getattr(agent, "user_memory_root", None),
     )
     # 委派的目标是“调查”，不是“放权执行”。
-    # 子 agent 以只读方式运行、步数更少，最后只把结论文本返回给父 agent。
+    # 子 agent 以只读方式运行，最后只把结论文本返回给父 agent。
     child.session["memory"]["task"] = task
-    child.session["memory"]["notes"] = [clip(agent.history_text(), 300)]
+    # 路径必须原样给全：之前把父级历史裁到 300 字符，
+    # 路径被截断成 "D:\Documents\Hepilot测..."，子 agent 据此回答
+    # "目录名无法确定"，父子两边白跑了好几轮。
+    child.session["memory"]["notes"] = [
+        f"Workspace root (absolute, verbatim): {agent.root}",
+        clip(agent.history_text(), DELEGATE_HISTORY_CLIP),
+    ]
     return "delegate_result:\n" + child.ask(task)
 
 
