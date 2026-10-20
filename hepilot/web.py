@@ -688,6 +688,19 @@ class FolderPicker:
         return True
 
 
+def list_workspaces(store):
+    """列出已经用过的工区，供"新建会话"时一键复用。"""
+    counts = {}
+    for meta in store.list():
+        root = str(meta.get("workspace_root", "") or "")
+        if not root:
+            continue
+        counts[root] = counts.get(root, 0) + 1
+    items = [{"workspace_root": root, "sessions": count} for root, count in counts.items()]
+    items.sort(key=lambda item: (-item["sessions"], item["workspace_root"]))
+    return {"workspaces": items}
+
+
 def list_directory(path):
     """给前端的工作区选择器列目录。"""
     target = Path(str(path)).expanduser().resolve()
@@ -783,6 +796,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"sessions": self.manager.store.list()})
             if path == "/api/pick-folder":
                 return self._send_json(self.manager.picker.result())
+            if path == "/api/workspaces":
+                return self._send_json(list_workspaces(self.manager.store))
             if path == "/api/fs":
                 target = (query.get("path") or [""])[0]
                 return self._send_json(list_directory(target or Path.home()))

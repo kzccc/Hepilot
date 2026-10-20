@@ -60,6 +60,42 @@
   }
   .sub-link:hover { color: var(--accent); }
 
+  /* ---------------- picker modal ---------------- */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(27, 31, 36, .32);
+    display: none; align-items: center; justify-content: center; z-index: 50;
+  }
+  .overlay.show { display: flex; }
+  .modal {
+    width: 680px; max-width: calc(100vw - 40px); max-height: calc(100vh - 90px);
+    background: #fff; border: 1px solid var(--border); border-radius: 12px;
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 12px 40px rgba(27, 31, 36, .18);
+  }
+  .modal h3 { margin: 0; padding: 16px 18px 10px; font-size: 15px; font-weight: 500; }
+  .path-row { display: flex; gap: 8px; padding: 0 18px 10px; }
+  .path-row input {
+    flex: 1; background: #fff; border: 1px solid var(--border); border-radius: 7px;
+    padding: 7px 10px; font-family: var(--mono); font-size: 12px; color: var(--fg); outline: none;
+  }
+  .path-row input:focus { border-color: #b6cdf7; box-shadow: 0 0 0 3px var(--accent-soft); }
+  .recent { padding: 0 18px 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .recent .chip2 {
+    font-family: var(--mono); font-size: 11px; border: 1px solid var(--border);
+    background: var(--panel); border-radius: 5px; padding: 3px 8px; cursor: pointer;
+    color: var(--dim); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .recent .chip2:hover { border-color: var(--accent); color: var(--accent); }
+  .entries { flex: 1; overflow-y: auto; border-top: 1px solid var(--border-soft); min-height: 220px; }
+  .entry {
+    display: flex; align-items: center; gap: 8px; padding: 6px 18px;
+    font-family: var(--mono); font-size: 12px; color: var(--dim); cursor: pointer;
+  }
+  .entry:hover { background: var(--panel-2); color: var(--fg); }
+  .entry .repo { color: var(--ok); font-size: 10px; }
+  .modal-foot { display: flex; gap: 8px; justify-content: flex-end; align-items: center; padding: 12px 18px; border-top: 1px solid var(--border-soft); }
+  .modal-err { color: var(--err); font-family: var(--mono); font-size: 12px; padding: 0 18px 8px; min-height: 18px; }
+
   .search-box { margin: 0 12px 8px; }
   .search-box input {
     width: 100%; background: #fff; border: 1px solid var(--border); border-radius: 7px;
@@ -227,6 +263,25 @@
       </div>
     </div>
   </main>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <h3>选择工作区目录</h3>
+    <div class="path-row">
+      <input id="pathInput" placeholder="直接输入路径，或从下面的列表点进去" />
+      <button class="ghost" id="upBtn">上一级</button>
+    </div>
+    <div class="recent" id="recent"></div>
+    <div class="entries" id="entries"></div>
+    <div class="modal-err" id="modalErr"></div>
+    <div class="modal-foot">
+      <button class="ghost" id="nativeBtn">系统对话框</button>
+      <span style="flex:1"></span>
+      <button class="ghost" id="cancelBtn">取消</button>
+      <button class="btn ok" id="useBtn">用这个目录新建</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -709,26 +764,80 @@ async function createSessionAt(path) {
   $("hint").textContent = "Enter 发送 · Shift+Enter 换行 · 双击左侧会话可重命名";
 }
 
-async function newSession() {
-  const btn = $("newBtn");
-  if (btn.disabled) return;
-  btn.disabled = true;
-  const original = btn.textContent;
-  btn.textContent = "等待选择…";
-  $("hint").textContent = "已弹出系统文件夹选择框；看不到的话请检查任务栏，或按 Esc 取消。";
+let browsePath = "";
+
+async function openPicker() {
+  $("overlay").classList.add("show");
+  $("modalErr").textContent = "";
+  const box = $("recent");
+  box.innerHTML = "";
   try {
-    await createSessionAt(await pickFolder());
-  } catch (err) {
-    const manual = window.prompt("没能选择目录（" + err.message + "）\n请手动输入工作区路径：", "");
-    if (manual) {
-      try { await createSessionAt(manual); }
-      catch (err2) { window.alert("创建失败：" + err2.message); }
+    const data = await api("/api/workspaces");
+    for (const item of (data.workspaces || []).slice(0, 6)) {
+      const chip = document.createElement("span");
+      chip.className = "chip2";
+      chip.textContent = item.workspace_root;
+      chip.title = item.workspace_root + `（${item.sessions} 个会话）`;
+      chip.onclick = () => browse(item.workspace_root);
+      box.appendChild(chip);
     }
-  } finally {
-    btn.disabled = false;
-    btn.textContent = original;
-    $("hint").textContent = "Enter 发送 · Shift+Enter 换行 · 双击左侧会话可重命名";
+  } catch (err) { /* 最近工作区拿不到不影响手动浏览 */ }
+  await browse("");
+}
+
+async function browse(path) {
+  try {
+    const data = await api(`/api/fs?path=${encodeURIComponent(path || "")}`);
+    browsePath = data.path;
+    $("pathInput").value = data.path;
+    const list = $("entries");
+    list.innerHTML = "";
+    for (const entry of data.entries) {
+      if (!entry.isDir) continue;
+      const row = document.createElement("div");
+      row.className = "entry";
+      row.innerHTML = `📁 ${escapeHtml(entry.name)}` + (entry.isRepo ? ' <span class="repo">● git</span>' : "");
+      row.onclick = () => browse(entry.path);
+      list.appendChild(row);
+    }
+    if (!list.children.length) list.innerHTML = '<div class="entry" style="cursor:default">（没有子目录）</div>';
+    $("modalErr").textContent = data.isRepo
+      ? ""
+      : "提示：这个目录不是 git 仓库，仍可使用，但仓库快照会少一部分信息。";
+  } catch (err) {
+    $("modalErr").textContent = err.message;
   }
+}
+
+async function useCurrentDir() {
+  const path = ($("pathInput").value || browsePath || "").trim();
+  if (!path) return;
+  $("useBtn").disabled = true;
+  try {
+    await createSessionAt(path);
+    $("overlay").classList.remove("show");
+  } catch (err) {
+    $("modalErr").textContent = err.message;
+  } finally {
+    $("useBtn").disabled = false;
+  }
+}
+
+async function nativePick() {
+  $("nativeBtn").disabled = true;
+  $("modalErr").textContent = "正在等待系统对话框…（如果看不到，按 Esc 取消）";
+  try {
+    await browse(await pickFolder());
+    $("modalErr").textContent = "";
+  } catch (err) {
+    $("modalErr").textContent = "系统对话框不可用：" + err.message + " —— 用上面的列表或直接输入路径即可。";
+  } finally {
+    $("nativeBtn").disabled = false;
+  }
+}
+
+function newSession() {
+  openPicker();
 }
 
 async function manualSession() {
@@ -747,7 +856,16 @@ function autosize() {
 /* ------------------------------ wiring ------------------------------ */
 
 $("newBtn").onclick = newSession;
-$("manualBtn").onclick = manualSession;
+$("manualBtn").onclick = () => { openPicker(); };
+$("cancelBtn").onclick = () => $("overlay").classList.remove("show");
+$("useBtn").onclick = useCurrentDir;
+$("upBtn").onclick = () => {
+  const current = ($("pathInput").value || browsePath || "").replace(/[\\/][^\\/]*$/, "");
+  browse(current || browsePath);
+};
+$("nativeBtn").onclick = nativePick;
+$("pathInput").onkeydown = (e) => { if (e.key === "Enter") browse($("pathInput").value); };
+$("overlay").onclick = (e) => { if (e.target === $("overlay")) $("overlay").classList.remove("show"); };
 $("tabChat").onclick = () => setView("chat");
 $("tabTrail").onclick = () => setView("trail");
 $("send").onclick = send;
