@@ -15,6 +15,12 @@ from functools import partial
 
 from .workspace import IGNORED_PATH_NAMES, clip
 
+# 搜索的硬上限：防止把盘符根当工作区时把 run 拖死。
+MAX_SEARCH_FILES = 2000
+MAX_SEARCH_FILE_BYTES = 1 * 1024 * 1024
+MAX_SEARCH_MATCHES = 200
+SEARCH_TIME_BUDGET_SECONDS = 15.0
+
 BASE_TOOL_SPECS = {
     "list_files": {
         "schema": {"path": "str='.'"},
@@ -187,7 +193,11 @@ def tool_read_file(agent, args):
 
 
 def tool_search(agent, args):
-    """优先用 `rg` 搜索，否则退回到纯 Python 扫描。"""
+    """优先用 `rg` 搜索，否则退回到纯 Python 扫描。
+
+    两条路径都必须有上限：工作区一旦是盘符根（例如 D:\\），无上限的递归
+    扫描会把整个 run 拖在这里几十分钟，而且没有任何进度可供外部判断。
+    """
     pattern = str(args.get("pattern", "")).strip()
     if not pattern:
         raise ValueError("pattern must not be empty")
@@ -195,28 +205,61 @@ def tool_search(agent, args):
 
     if shutil.which("rg"):
         # 优先用 rg，因为搜索会非常频繁，搜索延迟会直接影响 agent 控制循环。
-        result = subprocess.run(
-            ["rg", "-n", "--smart-case", "--max-count", "200", pattern, str(path)],
-            cwd=agent.root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        try:
+            result = subprocess.run(
+                ["rg", "-n", "--smart-case", "--max-count", str(MAX_SEARCH_MATCHES), pattern, str(path)],
+                cwd=agent.root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=SEARCH_TIME_BUDGET_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return f"(search timed out after {int(SEARCH_TIME_BUDGET_SECONDS)}s; narrow the path or pattern)"
         return result.stdout.strip() or result.stderr.strip() or "(no matches)"
 
+    deadline = time.monotonic() + SEARCH_TIME_BUDGET_SECONDS
     matches = []
-    files = [path] if path.is_file() else [
-        item for item in path.rglob("*")
-        if item.is_file() and not any(part in IGNORED_PATH_NAMES for part in item.relative_to(agent.root).parts)
-    ]
-    for file_path in files:
-        for number, line in enumerate(file_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+    scanned = 0
+    truncated = False
+    candidates = [path] if path.is_file() else path.rglob("*")
+    for file_path in candidates:
+        if time.monotonic() > deadline or scanned >= MAX_SEARCH_FILES:
+            truncated = True
+            break
+        try:
+            if not file_path.is_file():
+                continue
+            if any(part in IGNORED_PATH_NAMES for part in file_path.relative_to(agent.root).parts):
+                continue
+            # 大文件不扫：读它既慢又基本不会是我们要找的源码。
+            if file_path.stat().st_size > MAX_SEARCH_FILE_BYTES:
+                continue
+        except (OSError, ValueError):
+            continue
+        scanned += 1
+        try:
+            lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for number, line in enumerate(lines, start=1):
             if pattern.lower() in line.lower():
                 matches.append(f"{file_path.relative_to(agent.root)}:{number}:{line}")
-                if len(matches) >= 200:
-                    return "\n".join(matches)
-    return "\n".join(matches) or "(no matches)"
+                if len(matches) >= MAX_SEARCH_MATCHES:
+                    truncated = True
+                    break
+        if truncated:
+            break
+
+    if matches:
+        body = "\n".join(matches)
+        if truncated:
+            body += f"\n... (结果可能不全：已扫 {scanned} 个文件后停止)"
+        return body
+    note = f"(no matches; scanned {scanned} files"
+    note += " — 搜索范围被上限截断)" if truncated else ")"
+    return note
 
 
 def _kill_tree(process):

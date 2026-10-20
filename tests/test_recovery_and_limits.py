@@ -1,4 +1,4 @@
-"""进程重启后的状态回收、工作区路径校验、快照上限。"""
+"""进程重启后的状态回收、工作区路径校验、快照与搜索上限。"""
 
 from pathlib import Path
 
@@ -6,6 +6,7 @@ import pytest
 
 from hepilot import FakeModelClient
 from hepilot import runtime as runtime_mod
+from hepilot import tools as tools_mod
 from hepilot.runtime import Hepilot
 from hepilot.session_store import SessionStore
 from hepilot.web import AgentConfig, SessionManager
@@ -107,3 +108,37 @@ def test_snapshot_ignores_vcs_and_cache_dirs(tmp_path):
 
     assert all(".git" not in path for path in snapshot)
     assert all("__pycache__" not in path for path in snapshot)
+
+# ------------------------------------------------------------- 搜索上限
+
+
+def test_search_respects_file_cap(tmp_path, monkeypatch):
+    agent = make_agent(tmp_path)
+    for index in range(10):
+        (tmp_path / f"f{index}.txt").write_text("needle here\n", encoding="utf-8")
+    monkeypatch.setattr(tools_mod, "MAX_SEARCH_FILES", 3)
+
+    result = agent.run_tool("search", {"pattern": "needle", "path": "."})
+
+    # 只扫了 3 个文件，命中数必然远小于 10，而且明确告知结果被截断
+    assert result.count("needle") <= 3
+    assert "结果可能不全" in result or "no matches" in result
+
+
+def test_search_skips_oversized_files(tmp_path, monkeypatch):
+    agent = make_agent(tmp_path)
+    (tmp_path / "huge.txt").write_text("needle\n" * 200, encoding="utf-8")
+    monkeypatch.setattr(tools_mod, "MAX_SEARCH_FILE_BYTES", 8)
+
+    result = agent.run_tool("search", {"pattern": "needle", "path": "."})
+
+    assert "huge.txt" not in result
+
+
+def test_search_finds_matches_in_normal_case(tmp_path):
+    agent = make_agent(tmp_path)
+    (tmp_path / "a.py").write_text("def target():\n    pass\n", encoding="utf-8")
+
+    result = agent.run_tool("search", {"pattern": "target", "path": "."})
+
+    assert "a.py" in result
