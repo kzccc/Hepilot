@@ -14,7 +14,14 @@ from pathlib import Path
 import tomllib
  
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
-from .runtime import Hepilot, SessionStore, record_resume_failure
+from .runtime import (
+    DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_MAX_NEW_TOKENS,
+    DEFAULT_MAX_STEPS,
+    Hepilot,
+    SessionStore,
+    record_resume_failure,
+)
 from .memory import default_user_memory_root
 from .workspace import WorkspaceContext, middle
 
@@ -376,9 +383,10 @@ def build_arg_parser():
         default=[],
         help="Extra environment variable names to treat as secrets for trace/report redaction.",
     )
-    parser.add_argument("--max-steps", type=int, default=100, help="Maximum tool/model iterations per request.")
-    parser.add_argument("--max-attempts", type=int, default=100, help="Maximum model request rounds per run.")
-    parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
+    # 这三个默认值取自 runtime 的常量，不在命令行里另写一份字面量。
+    parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS, help="Maximum tool/model iterations per request.")
+    parser.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS, help="Maximum model request rounds per run.")
+    parser.add_argument("--max-new-tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS, help="Maximum model output tokens per step.")
     parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to Ollama.")
     parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to Ollama.")
     return parser

@@ -213,6 +213,10 @@
   .markdown hr { border: 0; border-top: 1px solid var(--border); margin: 1em 0; }
   .answer.streaming::after { content: "▍"; color: var(--accent); margin-left: 1px; animation: blink 1s steps(2, start) infinite; }
   @keyframes blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+  .run-indicator { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 4px 16px 12px; color: var(--faint); font-size: 11px; }
+  .run-spinner { width: 13px; height: 13px; box-sizing: border-box; border: 2px solid var(--border-soft); border-top-color: var(--accent); border-right-color: var(--accent); border-radius: 50%; animation: spin 850ms linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .run-spinner { animation-duration: 2.4s; } }
   .kbadge { display: inline-block; font-family: var(--mono); font-size: 10px; padding: 1px 7px; border-radius: 4px; margin-bottom: 5px; border: 1px solid transparent; }
   .kbadge.muted { color: var(--faint); border-color: var(--border); background: var(--panel); }
   .kbadge.ok { color: var(--ok); border-color: #a7d3b3; background: var(--ok-soft); }
@@ -698,6 +702,8 @@ function turnHtml(turn) {
       `<div class="b"><button class="btn ok" data-approve="1">允许</button><button class="btn no" data-deny="1">拒绝</button></div></div>`);
   }
   if (body.length) parts.push(`<div class="turn-body">${body.join("")}</div>`);
+  const isActiveTurn = state.busy && turn === state.turns[state.turns.length - 1];
+  if (isActiveTurn) parts.push('<div class="run-indicator" role="status" aria-label="运行中"><span class="run-spinner" aria-hidden="true"></span><span>运行中</span></div>');
 
   const foot = [];
   if (turn.live) {

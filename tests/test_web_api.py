@@ -125,6 +125,20 @@ def test_pending_tool_calls_render_as_one_collapsible_group():
     assert "state.expandedToolGroups.delete(groupKey)" in html
 
 
+def test_running_turn_shows_local_spinner_below_tool_cards():
+    """会话运行时只在当前轮工具卡片下方显示局部旋转指示器。"""
+    import re
+
+    html = _index_html()
+    assert ".run-spinner" in html
+    assert "@keyframes spin" in html
+    assert 'state.busy && turn === state.turns[state.turns.length - 1]' in html
+    assert 'class="run-indicator"' in html
+    assert 'aria-label="运行中"' in html
+    indicator_css = re.search(r"\.run-indicator\s*\{([^}]*)\}", html)
+    assert indicator_css and "position: fixed" not in indicator_css.group(1)
+
+
 def test_answers_use_safe_markdown_renderer():
     """模型回答应按安全 Markdown 渲染，而不是作为转义后的纯文本。"""
     import re

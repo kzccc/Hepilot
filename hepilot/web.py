@@ -23,7 +23,12 @@ from urllib.parse import parse_qs, unquote, urlparse
 from . import memory as memorylib
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
 from .run_store import RunStore
-from .runtime import Hepilot
+from .runtime import (
+    DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_MAX_NEW_TOKENS,
+    DEFAULT_MAX_STEPS,
+    Hepilot,
+)
 from .session_store import SessionStore, utc_now, workspace_slug
 from .workspace import WorkspaceContext
 
@@ -59,12 +64,23 @@ class AgentConfig:
     api_key: str = ""
     api_style: str = ""
     temperature: float = 0.2
-    max_steps: int = 100
-    max_attempts: int = 100
-    # 2048 太小：模型一次写多个 Go 文件（约 7k 字符）会撞上限被截断。
-    max_new_tokens: int = 8192
+    # 这三个默认值不在本文件里定，统一从 runtime 的常量取。
+    # 之前这里写死 8192、而命令行参数又写死 2048，命令行把 dataclass 覆盖了，
+    # 改的时候看不出来。
+    max_steps: int = DEFAULT_MAX_STEPS
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS
     approval_policy: str = "ask"
     secret_env_names: tuple = ()
+
+
+def agent_config_default(field):
+    """取 AgentConfig 某字段的默认值，用作命令行参数的默认值。
+
+    默认值只在这里链一次：runtime 常量 → AgentConfig 字段 → 命令行参数。
+    任何一环都不再写字面量，所以"改了一处却不生效"不会再发生。
+    """
+    return AgentConfig.__dataclass_fields__[field].default
 
 
 def build_model_client(config):
@@ -998,9 +1014,9 @@ def main(argv=None):
     parser.add_argument("--api-key", default="")
     parser.add_argument("--api-style", default="", choices=("", "responses", "chat"), help="openai 兼容接口风格；留空按 base_url 自动判断")
     parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--max-steps", type=int, default=100)
-    parser.add_argument("--max-attempts", type=int, default=100)
-    parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--max-steps", type=int, default=agent_config_default("max_steps"))
+    parser.add_argument("--max-attempts", type=int, default=agent_config_default("max_attempts"))
+    parser.add_argument("--max-new-tokens", type=int, default=agent_config_default("max_new_tokens"))
     parser.add_argument("--approval", default="ask", choices=("ask", "auto", "never"))
     args = parser.parse_args(argv)
 
@@ -1020,7 +1036,10 @@ def main(argv=None):
     url = f"http://{args.host}:{args.port}/"
     print(f"hepilot web listening on {url}")
     print(f"sessions root: {Path(args.sessions_root).resolve()}")
-    print(f"limits: max_steps={config.max_steps} max_attempts={config.max_attempts}")
+    print(
+        f"limits: max_steps={config.max_steps} max_attempts={config.max_attempts} "
+        f"max_new_tokens={config.max_new_tokens}"
+    )
     print("Ctrl+C to stop.")
     try:
         server.serve_forever()

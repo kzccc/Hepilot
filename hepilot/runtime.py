@@ -61,6 +61,20 @@ DEFAULT_FEATURE_FLAGS = {
 # checkpoint 的格式版本
 CHECKPOINT_SCHEMA_VERSION = "phase1-v1"
 
+# ---- 运行时默认预算（唯一来源）----
+#
+# 这三个常量是"默认值"的唯一定义处：Hepilot 的构造参数、CLI 与 Web 的
+# 命令行默认值全部从它们取。
+#
+# 为什么要有这一层：之前三处各写一个字面量——Hepilot 里 512、web 的
+# AgentConfig 里 8192、web 的命令行里 2048——结果把 8192 改上去之后
+# 命令行的 2048 又把它覆盖掉，"改了却不生效"，而且没人看得出来。
+DEFAULT_MAX_STEPS = 100
+DEFAULT_MAX_NEW_TOKENS = 8192
+# 只给命令行用：Hepilot 自己的 max_attempts 保持 None（表示按 max_steps 推导），
+# 直接调 API 的老代码行为不变。
+DEFAULT_MAX_ATTEMPTS = 100
+
 # 模型偶尔会退回自己在训练时见过的原生函数调用方言
 # （DeepSeek 的 <｜｜DSML｜｜...>、Anthropic 的 <antml:invoke>、
 # 通用的 <function_calls> / <invoke name=）。这些都不是本项目的协议。
@@ -266,9 +280,9 @@ class Hepilot:
         session=None,
         run_store=None,
         approval_policy="ask",
-        max_steps=100,
+        max_steps=DEFAULT_MAX_STEPS,
         max_attempts=None,
-        max_new_tokens=512,
+        max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
         depth=0,
         max_depth=1,
         read_only=False,
