@@ -5,7 +5,6 @@
 """
 
 import subprocess
-import textwrap
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -13,9 +12,28 @@ from pathlib import Path
 
 MAX_TOOL_OUTPUT = 8000
 MAX_HISTORY = 24000
-# 这些文件最可能直接影响 agent 的行动方式。
-# 我们不会预加载整个仓库，只会先给模型一小份“导航包”。
-DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
+# 预加载的文档白名单，**按优先级排序**。
+#
+# 排序有实际意义：prefix 超预算时是从尾部截断的，而文档段排在九段的最后，
+# 所以越靠前的文档越不会被砍掉。AGENTS.md / CLAUDE.md 是直接约束 agent
+# 行为的指令，优先级高于项目介绍。
+DOC_NAMES = (
+    "AGENTS.md",
+    "CLAUDE.md",
+    "README.md",
+    "CONTRIBUTING.md",
+    "pyproject.toml",
+    "package.json",
+    "go.mod",
+    "Cargo.toml",
+    "requirements.txt",
+    "Makefile",
+)
+# 单份文档最多带多少字符进 prompt。
+DOC_PER_FILE_LIMIT = 1200
+# 所有文档加起来的预算。9 段里文档最容易膨胀，不给总上限的话
+# 一个超大 README 会把整段 prefix 挤满。
+DOC_TOTAL_LIMIT = 4000
 IGNORED_PATH_NAMES = {".git", ".hepilot", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
 
 
@@ -91,15 +109,34 @@ class WorkspaceContext:
         docs = {}
         # 同时扫描 repo_root 和 cwd，这样在子目录启动时也能看到本地文档；
         # 但用相对路径做 key，避免同一份文档被重复收集。
+        #
+        # 两道限制：单份最多 DOC_PER_FILE_LIMIT、总量最多 DOC_TOTAL_LIMIT。
+        # 读取时就用 read(limit+1) 而不是 read() 再 clip——一个几百 KB 的
+        # README 没必要整个读进内存才砍掉。
+        remaining = DOC_TOTAL_LIMIT
         for base in (repo_root, cwd):
             for name in DOC_NAMES:
+                if remaining <= 0:
+                    break
                 path = base / name
-                if not path.exists():
+                try:
+                    if not path.is_file():
+                        continue
+                    key = str(path.relative_to(repo_root))
+                except (OSError, ValueError):
                     continue
-                key = str(path.relative_to(repo_root))
                 if key in docs:
                     continue
-                docs[key] = clip(path.read_text(encoding="utf-8", errors="replace"), 1200)
+                limit = min(DOC_PER_FILE_LIMIT, remaining)
+                try:
+                    with path.open("r", encoding="utf-8", errors="replace") as handle:
+                        snippet = handle.read(limit + 1)
+                except OSError:
+                    continue
+                if len(snippet) > limit:
+                    snippet = snippet[:limit] + "\n...[truncated]"
+                docs[key] = snippet
+                remaining -= len(snippet)
 
         return cls(
             cwd=str(cwd),
