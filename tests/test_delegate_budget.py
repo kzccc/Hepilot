@@ -49,12 +49,13 @@ def test_delegate_gives_child_full_workspace_path(tmp_path, monkeypatch):
 
     monkeypatch.setattr("hepilot.runtime.Hepilot", Spy)
 
-    result = agent.tool_delegate({"task": "find the cwd", "max_steps": 40})
+    result = agent.tool_delegate({"task": "find the cwd", "max_steps": 80})
 
     assert result.startswith("delegate_result:")
-    # 子 agent 的预算被抬高了，而不是沿用 3
-    assert captured["steps"] == 40
-    assert captured["attempts"] >= 40
+    # 模型传的 80 落在 [50, 100] 区间内，原样生效
+    assert captured["steps"] == 80
+    # 请求轮次上限 = 步数 + 余量，不再放大成 2 倍
+    assert captured["attempts"] == 90
     # 绝对路径原样给出，且带明确前缀
     notes = "\n".join(captured["notes"])
     assert "Workspace root (absolute, verbatim)" in notes

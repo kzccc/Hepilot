@@ -114,25 +114,30 @@ class WorkspaceContext:
         )
 
     def text(self):
-        """把快照渲染成 prompt prefix 可直接拼接的文本块。"""
-        # 这段文本会被塞进 prompt prefix，作为相对稳定的基线上下文。
+        """把快照渲染成 prompt prefix 可直接拼接的文本块。
+
+        不能用 textwrap.dedent：status / docs 是多行插值，它们的续行没有缩进，
+        dedent 会把公共前缀算成 0、整段失效，渲染出来每行顶着一层多余空格。
+        """
         commits = "\n".join(f"- {line}" for line in self.recent_commits) or "- none"
         docs = "\n".join(f"- {path}\n{snippet}" for path, snippet in self.project_docs.items()) or "- none"
-        return textwrap.dedent(
-            f"""\
-            Workspace:
-            - cwd: {self.cwd}
-            - repo_root: {self.repo_root}
-            - branch: {self.branch}
-            - default_branch: {self.default_branch}
-            - status:
-            {self.status}
-            - recent_commits:
-            {commits}
-            - project_docs:
-            {docs}
-            """
-        ).strip()
+        lines = [
+            "Workspace:",
+            f"- cwd: {self.cwd}",
+            f"- repo_root: {self.repo_root}",
+            f"- branch: {self.branch}",
+            f"- default_branch: {self.default_branch}",
+            # 明确给出"是不是 git 仓库"，别让模型从 branch '-' 去猜；
+            # 也避免把 status 的兜底值 'clean' 误当成"仓库干净"。
+            f"- is_git_repo: {'true' if self.branch != '-' else 'false'}",
+            "- status:",
+            str(self.status).strip(),
+            "- recent_commits:",
+            commits,
+            "- project_docs:",
+            docs,
+        ]
+        return "\n".join(lines).strip()
 
     def fingerprint(self):
         """生成快照指纹，用于判断 prefix 是否需要整体刷新。"""

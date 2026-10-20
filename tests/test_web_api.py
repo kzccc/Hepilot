@@ -101,6 +101,30 @@ def test_streaming_events_do_not_force_chat_to_bottom():
     assert "scrollBottom()" not in match.group(1)
 
 
+def test_expanded_tool_steps_stay_open_when_chat_rerenders():
+    """追加工具事件重绘对话时，已展开的旧工具卡片仍保持展开。"""
+    html = _index_html()
+    assert "expandedSteps: new Set()" in html
+    assert "stepKey: itemIndex" in html
+    assert 'data-step-key="${step.stepKey}"' in html
+    assert "state.expandedSteps.has(step.stepKey)" in html
+    assert "state.expandedSteps.add(stepKey)" in html
+    assert "state.expandedSteps.delete(stepKey)" in html
+    assert "state.expandedSteps = new Set()" in html
+
+
+def test_pending_tool_calls_render_as_one_collapsible_group():
+    """最终回答产生前，本轮工具调用以一条摘要呈现并可整体展开。"""
+    html = _index_html()
+    assert "expandedToolGroups: new Set()" in html
+    assert 'const pendingTools = turn.steps.length > 0 && turn.answerKind !== "final"' in html
+    assert "tool-group-head" in html
+    assert 'turn.steps.length} 个工具调用' in html
+    assert "state.expandedToolGroups.has(groupKey)" in html
+    assert "state.expandedToolGroups.add(groupKey)" in html
+    assert "state.expandedToolGroups.delete(groupKey)" in html
+
+
 def test_answers_use_safe_markdown_renderer():
     """模型回答应按安全 Markdown 渲染，而不是作为转义后的纯文本。"""
     import re

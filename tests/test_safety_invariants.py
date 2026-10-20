@@ -141,6 +141,24 @@ def test_run_shell_uses_allowlisted_environment_only(tmp_path):
     assert "missing" in result
 
 
+def test_shell_env_preserves_windows_and_go_toolchain_settings(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+    expected = {
+        "USERPROFILE": r"C:\Users\tester",
+        "APPDATA": r"C:\Users\tester\AppData\Roaming",
+        "SYSTEMROOT": r"C:\Windows",
+        "COMSPEC": r"C:\Windows\System32\cmd.exe",
+        "GOPATH": r"D:\go",
+        "GOMODCACHE": r"D:\go\pkg\mod",
+        "GOPROXY": "https://proxy.example.invalid,direct",
+    }
+
+    with patch.dict(os.environ, expected, clear=False):
+        shell_env = agent.shell_env()
+
+    assert {name: shell_env.get(name) for name in expected} == expected
+
+
 def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="auto")
 

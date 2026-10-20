@@ -59,12 +59,15 @@ BASE_TOOL_SPECS = {
 # 子 agent 拿到的父级历史上限。原来只有 300 字符，
 # 路径这类长串经常被截断在中间，子 agent 会把截断后的片段当成真实环境。
 DELEGATE_HISTORY_CLIP = 1500
-DELEGATE_DEFAULT_STEPS = 25
+DELEGATE_DEFAULT_STEPS = 50
 # 模型会自己在参数里传 max_steps，而且经常传得很小（实测有 2、3、12、15），
-# 把默认值抬到 25 也拦不住它。所以这里对子 agent 的步数强制设下限：
+# 把默认值抬高也拦不住它。所以这里对子 agent 的步数强制设下限：
 # 模型传的只是一个"建议"，真实预算由 runtime 兜底。
-DELEGATE_MIN_STEPS = 25
-DELEGATE_MAX_STEPS = 60
+DELEGATE_MIN_STEPS = 50
+DELEGATE_MAX_STEPS = 100
+# 模型请求轮次上限 = 步数 + 这点余量（余量留给格式重试）。
+# 不能用 steps*2：100 步会放大成 200 次请求。
+DELEGATE_ATTEMPT_HEADROOM = 10
 #子代理(子agent)工具的规格说明
 DELEGATE_TOOL_SPEC = {
     "schema": {"task": "str", "max_steps": f"int={DELEGATE_MIN_STEPS}"},
@@ -424,7 +427,7 @@ def tool_delegate(agent, args):
         run_store=agent.run_store,
         approval_policy="never",
         max_steps=child_steps,
-        max_attempts=max(child_steps * 2, DELEGATE_DEFAULT_STEPS),
+        max_attempts=child_steps + DELEGATE_ATTEMPT_HEADROOM,
         max_new_tokens=agent.max_new_tokens,
         depth=agent.depth + 1,
         max_depth=agent.max_depth,

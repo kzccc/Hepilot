@@ -178,6 +178,10 @@
   .step-name { color: var(--fg); font-weight: 500; }
   .step-args { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
   .step-toggle { color: var(--faint); font-size: 11px; user-select: none; cursor: pointer; }
+  .tool-group-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 0; border: 0; border-bottom: 1px dashed var(--border-soft); background: transparent; color: var(--dim); text-align: left; cursor: pointer; }
+  .tool-group-label { flex: 0 0 auto; font-size: 12px; }
+  .tool-group-names { overflow: hidden; color: var(--faint); font-family: var(--mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+  .tool-group-toggle { flex: 0 0 auto; margin-left: auto; color: var(--faint); font-size: 11px; }
   .step-result { margin-top: 6px; font-family: var(--mono); font-size: 12px; color: var(--dim); background: var(--panel); border: 1px solid var(--border-soft); border-radius: 7px; padding: 8px 10px; }
   .step-result pre { margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow: auto; }
   .step.collapsed .step-result { display: none; }
@@ -324,6 +328,8 @@ const state = {
   lastSeq: 0, es: null, busy: false,
   items: [],          // 原始 transcript 条目
   turns: [],          // 由 items 折叠出的轮次
+  expandedSteps: new Set(),
+  expandedToolGroups: new Set(),
   collapsed: new Set(),
   filter: "",
   renaming: null,
@@ -472,7 +478,7 @@ function buildTurns(items) {
     if (!cur) { cur = { user: "", steps: [], answer: "", answerKind: "", error: "", end: null, approvals: [], live: "", liveKind: "" }; turns.push(cur); }
     return cur;
   };
-  for (const it of items) {
+  for (const [itemIndex, it] of items.entries()) {
     if (it.kind === "user") {
       cur = { user: it.text || "", steps: [], answer: "", answerKind: "", error: "", end: null, approvals: [], live: "", liveKind: "" };
       turns.push(cur);
@@ -490,7 +496,7 @@ function buildTurns(items) {
         turn.answerKind = it.msgKind || "final";
         break;
       case "tool":
-        turn.steps.push(it);
+        turn.steps.push({ ...it, stepKey: itemIndex });
         break;
       case "delta":
         turn.live += it.text || "";
@@ -664,14 +670,25 @@ function turnHtml(turn) {
     parts.push(`<div class="turn-head"><div class="turn-label">you</div><div class="turn-user">${escapeHtml(turn.user)}</div></div>`);
   }
   const body = [];
-  for (const step of turn.steps) {
+  const pendingTools = turn.steps.length > 0 && turn.answerKind !== "final";
+  const groupKey = turn.steps[0]?.stepKey;
+  const groupExpanded = pendingTools && state.expandedToolGroups.has(groupKey);
+  if (pendingTools) {
+    const names = turn.steps.map((step) => escapeHtml(step.name || "tool")).join("、");
+    body.push(`<button type="button" class="tool-group-head" data-tool-group-key="${groupKey}">` +
+      `<span class="tool-group-label">${turn.steps.length} 个工具调用</span>` +
+      `<span class="tool-group-names">${names}</span>` +
+      `<span class="tool-group-toggle">${groupExpanded ? "收起" : "展开详情"}</span></button>`);
+  }
+  for (const step of (pendingTools && !groupExpanded ? [] : turn.steps)) {
     const bad = step.synthetic || /^error/i.test(step.result || "");
-    body.push('<div class="step collapsed">');
+    const collapsed = !state.expandedSteps.has(step.stepKey);
+    body.push(`<div class="step${collapsed ? " collapsed" : ""}" data-step-key="${step.stepKey}">`);
     body.push(`<div class="step-head">`);
     body.push(`<span class="step-name">${escapeHtml(step.name || "tool")}</span>`);
     body.push(`<span class="step-args">${escapeHtml(compactArgs(step.args))}</span>`);
     if (step.synthetic) body.push('<span class="pill bad">未执行</span>');
-    body.push(`<span class="step-toggle">展开</span></div>`);
+    body.push(`<span class="step-toggle">${collapsed ? "展开" : "收起"}</span></div>`);
     body.push(`<div class="step-result"><pre>${escapeHtml(truncate(step.result || "", 3000))}</pre></div>`);
     body.push("</div>");
   }
@@ -703,11 +720,23 @@ function turnHtml(turn) {
 }
 
 function bindStepToggles(root) {
+  root.querySelectorAll(".tool-group-head").forEach((head) => {
+    head.onclick = () => {
+      const groupKey = Number(head.dataset.toolGroupKey);
+      if (state.expandedToolGroups.has(groupKey)) state.expandedToolGroups.delete(groupKey);
+      else state.expandedToolGroups.add(groupKey);
+      renderChat();
+    };
+  });
   root.querySelectorAll(".step-head").forEach((head) => {
     head.onclick = () => {
       const step = head.parentElement;
       step.classList.toggle("collapsed");
-      head.querySelector(".step-toggle").textContent = step.classList.contains("collapsed") ? "展开" : "收起";
+      const collapsed = step.classList.contains("collapsed");
+      const stepKey = Number(step.dataset.stepKey);
+      if (collapsed) state.expandedSteps.delete(stepKey);
+      else state.expandedSteps.add(stepKey);
+      head.querySelector(".step-toggle").textContent = collapsed ? "展开" : "收起";
     };
   });
 }
@@ -781,6 +810,8 @@ async function openSession(id) {
   state.lastSeq = 0;
   state.items = [];
   state.turns = [];
+  state.expandedSteps = new Set();
+  state.expandedToolGroups = new Set();
   closeStream();
   const data = await api(`/api/sessions/${id}`);
   state.lastSeq = data.lastSeq || 0;

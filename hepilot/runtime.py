@@ -25,7 +25,32 @@ from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, 
 
 SENSITIVE_ENV_NAME_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
 REDACTED_VALUE = "<redacted>"
-DEFAULT_SHELL_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER")
+DEFAULT_SHELL_ENV_ALLOWLIST = (
+    "APPDATA",
+    "COMSPEC",
+    "GOMODCACHE",
+    "GOPATH",
+    "GOPROXY",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOCALAPPDATA",
+    "LOGNAME",
+    "PATH",
+    "PWD",
+    "SHELL",
+    "SYSTEMROOT",
+    "TERM",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "USER",
+    "USERPROFILE",
+    "WINDIR",
+)
 #功能的开关配置
 DEFAULT_FEATURE_FLAGS = {
     "memory": True,
@@ -525,77 +550,171 @@ class Hepilot:
             )
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
-    def build_prefix(self):
-        """构造模型每轮都会看到的稳定工作手册前缀。"""
-        tool_lines = []
-        for name, tool in self.tools.items():
-            fields = ", ".join(f"{key}: {value}" for key, value in tool["schema"].items())
-            risk = "approval required" if tool["risky"] else "safe"
-            tool_lines.append(f"- {name}({fields}) [{risk}] {tool['description']}")
-        tool_text = "\n".join(tool_lines)
-        # 提前把“单轮可多工具、按顺序执行”的协议写进前缀，避免后续 parser/runtime
-        # 支持批量 tool call 后，模型仍然被旧提示约束成“每轮只能一个工具”。
-        examples = "\n".join(
-            [
-                '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-                '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-                '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":40}}</tool>\n<tool>{"name":"search","args":{"pattern":"TODO","path":"."}}</tool>',
-                '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-                '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-                '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-                "<final>Done.</final>",
-            ]
+    # ---- prefix 的九个组成部分 ----
+    #
+    # 为什么拆成独立函数而不是一整段字符串：
+    # 其中三段要按"当前有哪些工具"变（read_only 的子 agent 不该看到"写文件前先确认"，
+    # 没有 run_shell 的环境不该提审批）。写成函数才能接收这个上下文。
+
+    def _has_tool(self, *names):
+        """返回这些工具里当前真实存在的那些。"""
+        return [name for name in names if name in self.tools]
+
+    def section_role(self):
+        """① 身份与红线。"""
+        return textwrap.dedent(
+            """\
+            你是 Hepilot，一个运行在用户本机上的编码 agent，只能操作当前这一个工作目录。
+            你不能联网，也不能访问这个目录之外的文件。
+
+            不要编造仓库里不存在的路径、文件内容或命令输出。需要确认时用工具去查。"""
         )
-        # prefix 可以理解成 agent 的“工作手册”：
-        # 它是谁、工具怎么调用、当前仓库是什么状态，都写在这里。
-        text = textwrap.dedent(
-            f"""\
-            You are Hepilot, a local coding agent working inside a local repository.
 
-            Rules:
-            - Use tools instead of guessing about the workspace.
-            - Return one or more <tool>...</tool> blocks, or one <final>...</final>.
-            - If you need multiple independent tools in the same turn, emit multiple <tool> blocks in order.
-            - If you emit any <tool> block, do not emit a <final> block in the same reply.
-            - Tool calls must look like:
-              <tool>{{"name":"tool_name","args":{{...}}}}</tool>
-            - For write_file and patch_file with multi-line text, prefer XML style:
-              <tool name="write_file" path="file.py"><content>...</content></tool>
-            - Final answers must look like:
-              <final>your answer</final>
-            - Do not use any other tool-call syntax. Native function-call markup
-              (<|DSML|>, <antml:invoke>, <function_calls>, <tool_call>) is not
-              executable here and will be discarded.
-            - Never invent tool results.
-            - Keep answers concise and concrete.
-            - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
-            - Before writing tests for existing code, read the implementation first.
-            - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
-            - New files should be complete and runnable, including obvious imports.
-            - Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.
-            - Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, or delegate with args={{}}.
+    def section_runtime(self):
+        """② 运行机制：让模型知道它会被哪些机制拦住。"""
+        lines = []
+        if self.read_only:
+            lines.append("- 你是只读的：不能写文件、不能改文件、不能执行 shell 命令。")
+        risky = [name for name, tool in self.tools.items() if tool["risky"]]
+        if risky and not self.read_only:
+            labels = {
+                "run_shell": "执行 shell 命令",
+                "write_file": "写文件",
+                "patch_file": "修改文件",
+            }
+            readable = "、".join(f"{labels.get(name, name)}（{name}）" for name in sorted(risky))
+            lines.append(
+                f"- 部分工具执行前会请求用户批准：{readable}。"
+                "用户拒绝时不要重试同一个调用，先判断有没有别的做法。"
+            )
+        lines.append("- 用户可以随时中断你的运行。中断不是故障，不需要修复。")
+        lines.append(
+            f"- 同一个文件在一次运行里被读取超过 {READ_REPEAT_LIMIT} 次会被拒绝——"
+            "那说明你在原地打转，应该基于已有内容继续，或换个做法。"
+        )
+        lines.append(
+            f"- 连续 {FAILURE_STREAK_NOTICE} 次工具调用失败后，你会收到一条提醒："
+            "停下来汇报阻塞，而不是继续换参数重试。"
+        )
+        lines.append(
+            f"- 每轮有步数预算（当前 {self.max_steps} 步）。"
+            "委派出去的子 agent 有自己的预算，且只能读、不能改文件。"
+        )
+        return "# 运行机制\n" + "\n".join(lines)
 
-            Tools:
-            {tool_text}
+    def section_scope(self):
+        """③ 范围克制。"""
+        lines = [
+            "- 只做用户要求的事。修一个问题不需要顺手清理周边代码，加一个功能不需要额外可配置性。",
+            "- 不为不可能发生的场景写错误处理、兜底和校验。只在系统边界做校验："
+            "用户输入、外部命令的输出。",
+            "- 不为一次性操作抽公共函数，不为假设的未来需求做设计。"
+            "三行相似的代码好过一个过早的抽象。",
+            "- 除非用户明确要求记住、保存或记录下来，否则不要往长期记忆里写东西。",
+        ]
+        if "delegate" in self.tools:
+            lines.append(
+                f"- 不要浪费步数：委派一次子 agent 至少会消耗它 {toolkit.DELEGATE_MIN_STEPS} 步的预算，"
+                "只为找一个文件名不值得。"
+            )
+        return "# 范围克制\n" + "\n".join(lines)
 
-            Valid response examples:
-            {examples}
+    def section_risk(self):
+        """④ 风险确认。只在实际存在高风险工具时才出现。"""
+        if self.read_only or not any(tool["risky"] for tool in self.tools.values()):
+            return None
+        return textwrap.dedent(
+            """\
+            # 风险确认
+            - 在用户的工作目录里执行命令前，先想清楚这条命令会改动什么。
+            - 不要用破坏性手段绕过障碍：不要删锁文件、不要跳过检查、不要丢弃未提交的改动。
+              遇到这类状态先查明原因。
+            - 删除、覆盖、批量修改这类操作，先说明后果再执行。"""
+        )
 
-            Durable Memory:
-            When the user asks you to remember, capture, save, or persist something across sessions
-            (e.g. "remember that...", "记下...", "保存这个...", "沉淀..."), include the relevant
-            facts in your final answer using the following labels, one per line:
+    def section_tool_policy(self):
+        """⑤ 工具取舍。只讲怎么选，不讲格式——格式由 function calling 的 tools 字段定义。"""
+        if not self.tools:
+            return None
+        lines = []
+        if self._has_tool("read_file", "write_file", "patch_file", "search"):
+            lines.append(
+                "- 有专用工具就不要用 shell 里的等价命令——专用工具的结果用户能看清，"
+                "shell 输出只是一段文本。"
+            )
+        if self._has_tool("list_files", "search"):
+            lines.append("- 找具体文件或符号，直接用 list_files 或 search，不要起子 agent。")
+        if "delegate" in self.tools:
+            lines.append("- 只有需要超过 3 次查询的调研，才值得委派。")
+        if self._has_tool("write_file"):
+            lines.append(
+                "- 写文件一次写一个。多个大文件塞进一轮回复会被输出长度截断，截断后整轮作废。"
+            )
+        if not lines:
+            return None
+        return "# 工具取舍\n" + "\n".join(lines)
 
-            Project convention: <stable project rule or convention>
-            Decision: <important decision and its rationale>
-            Dependency: <stable dependency or environment fact>
-            Preference: <user preference to follow in future sessions>
+    def section_tone(self):
+        """⑥ 措辞格式。"""
+        return textwrap.dedent(
+            """\
+            # 措辞格式
+            - 用户主要用中文，用中文回答。
+            - 引用代码位置写成 path:line 的形式。
+            - 工具调用前不要写"让我看看："这类带冒号的引导句。
+            - 最终答案用 <final>...</final> 包起来。"""
+        )
 
-            Chinese labels are also accepted: 项目约定：, 决策：, 依赖：, 偏好：
+    def section_output(self):
+        """⑦ 输出精简。"""
+        return textwrap.dedent(
+            """\
+            # 输出精简
+            - 先给结论，再给依据。不要铺垫。
+            - 工具调用只显示成摘要，用户唯一能完整看到的是你的最终回答——
+              所以结论、以及没能验证的部分，都要写进去。
+            - 一句话能说清就不要用三句。"""
+        )
 
-            {self.workspace.text()}
-            """
-        ).strip()
+    def section_durable_memory(self):
+        """⑧ 长期记忆的标签格式。
+
+        标签必须保留英文原样：promote_durable_memory 的正则按
+        `Project convention:` / `Decision:` / `Dependency:` / `Preference:`
+        逐行匹配。中文标签是另一套等价正则，两种都认。
+        """
+        return textwrap.dedent(
+            """\
+            # 长期记忆
+            当用户要求你记住、保存或记录下来时，把这些事实写进最终回答，每行一个标签：
+
+            Project convention: <稳定的项目规则或约定>
+            Decision: <重要决策及其理由>
+            Dependency: <稳定的依赖或环境事实>
+            Preference: <以后都要遵守的用户偏好>
+
+            也接受中文标签：项目约定：、决策：、依赖：、偏好："""
+        )
+
+    def build_prefix(self):
+        """构造模型每轮都会看到的稳定工作手册前缀。
+
+        九段顺序固定：七段行为规则 + 长期记忆标签格式 + 工作区快照。
+        task checkpoint 不在这里——它每一轮都会变，由 ContextManager
+        追加在 prefix 末尾，不能进 prefix 哈希。
+        """
+        sections = [
+            self.section_role(),
+            self.section_runtime(),
+            self.section_scope(),
+            self.section_risk(),
+            self.section_tool_policy(),
+            self.section_tone(),
+            self.section_output(),
+            self.section_durable_memory(),
+            self.workspace.text(),
+        ]
+        text = "\n\n".join(section for section in sections if section).strip()
         return PromptPrefix(
             text=text,
             hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
